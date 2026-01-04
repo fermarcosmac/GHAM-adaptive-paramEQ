@@ -1,10 +1,3 @@
-#import os
-# Temporary workaround: allow duplicate OpenMP runtime while debugging.
-# Unsafe: may lead to crashes or incorrect results. See notes below.
-#os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
-#I have a GeForce RTX 4060 GPU, and the NVIDIA webpage ays that the Compute Capability (CC) for this GPU is 8.9. So please, install cuda and 
-
 import torch
 import torchaudio
 import dasp_pytorch
