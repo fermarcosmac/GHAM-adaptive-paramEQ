@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import scipy.signal
-import dasp_pytorch.signal
+from . import signal
 
 from functools import partial
 from typing import Dict, List
@@ -210,7 +210,7 @@ def parametric_eq(
     # six second order sections
     sos = torch.zeros(eff_bs, 6, 6).type_as(low_shelf_gain_db)
     # ------------ low shelf ------------
-    b, a = dasp_pytorch.signal.biquad(
+    b, a = signal.biquad(
         low_shelf_gain_db,
         low_shelf_cutoff_freq,
         low_shelf_q_factor,
@@ -219,7 +219,7 @@ def parametric_eq(
     )
     sos[:, 0, :] = torch.cat((b, a), dim=-1)
     # ------------ band0 ------------
-    b, a = dasp_pytorch.signal.biquad(
+    b, a = signal.biquad(
         band0_gain_db,
         band0_cutoff_freq,
         band0_q_factor,
@@ -228,7 +228,7 @@ def parametric_eq(
     )
     sos[:, 1, :] = torch.cat((b, a), dim=-1)
     # ------------ band1 ------------
-    b, a = dasp_pytorch.signal.biquad(
+    b, a = signal.biquad(
         band1_gain_db,
         band1_cutoff_freq,
         band1_q_factor,
@@ -237,7 +237,7 @@ def parametric_eq(
     )
     sos[:, 2, :] = torch.cat((b, a), dim=-1)
     # ------------ band2 ------------
-    b, a = dasp_pytorch.signal.biquad(
+    b, a = signal.biquad(
         band2_gain_db,
         band2_cutoff_freq,
         band2_q_factor,
@@ -246,7 +246,7 @@ def parametric_eq(
     )
     sos[:, 3, :] = torch.cat((b, a), dim=-1)
     # ------------ band3 ------------
-    b, a = dasp_pytorch.signal.biquad(
+    b, a = signal.biquad(
         band3_gain_db,
         band3_cutoff_freq,
         band3_q_factor,
@@ -255,7 +255,7 @@ def parametric_eq(
     )
     sos[:, 4, :] = torch.cat((b, a), dim=-1)
     # ------------ high shelf ------------
-    b, a = dasp_pytorch.signal.biquad(
+    b, a = signal.biquad(
         high_shelf_gain_db,
         high_shelf_cutoff_freq,
         high_shelf_q_factor,
@@ -264,7 +264,7 @@ def parametric_eq(
     )
     sos[:, 5, :] = torch.cat((b, a), dim=-1)
 
-    x_out = dasp_pytorch.signal.sosfilt_via_fsm(sos, x)
+    x_out = signal.sosfilt_via_fsm(sos, x)
 
     # move channels back
     x_out = x_out.view(bs, chs, seq_len)
@@ -377,7 +377,7 @@ def compressor(
         [torch.ones(eff_bs, 1, 1).type_as(alpha_A), -alpha_A],
         dim=-1,
     ).squeeze(1)
-    g_c_attack = dasp_pytorch.signal.lfilter_via_fsm(g_c, b, a)
+    g_c_attack = signal.lfilter_via_fsm(g_c, b, a)
 
     # look-ahead by delaying the input signal in relation to gain reduction
     if lookahead_samples > 0:
