@@ -1,5 +1,5 @@
 import torch
-from dasp_pytorch.functional import (
+from .functional import (
     gain,
     distortion,
     compressor,

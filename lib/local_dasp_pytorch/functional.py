@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-import scipy.signal
+#import scipy.signal
 from . import signal
 
 from functools import partial
@@ -534,7 +534,7 @@ def noise_shaped_reverberation(
     band_decays = band_decays.unsqueeze(-1)
 
     # create the octave band filterbank filters
-    filters = dasp_pytorch.signal.octave_band_filterbank(num_bandpass_taps, sample_rate)
+    filters = signal.octave_band_filterbank(num_bandpass_taps, sample_rate)
     filters = filters.type_as(x)
     num_bands = filters.shape[0]
 

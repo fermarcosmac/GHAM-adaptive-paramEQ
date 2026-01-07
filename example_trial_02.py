@@ -15,7 +15,7 @@ import numpy as np
 #%% SETUP: LOAD AUDIO AND DEFINE PROCESSOR WITH GROUND-TRUTH PARAMETERS
 
 # Load audio
-x, sr = torchaudio.load("audio/guitar-riff.wav")
+x, sr = torchaudio.load("data/audio/input/guitar-riff.wav")
 
 # create batch dim
 # (batch_size, n_channels, n_samples)
