@@ -213,8 +213,9 @@ if __name__ == "__main__":
     print(f"Loaded audio: {audio_path}, {len(audio)} samples, {sr} Hz, {duration_s:.2f} s")
 
     # Load RIRs (pick 2 for now)
-    rirs, rirs_srs = load_rirs(rir_dir, max_n=2)
-    if len(rirs) < 2:
+    max_n_rirs = 3
+    rirs, rirs_srs = load_rirs(rir_dir, max_n=max_n_rirs)
+    if len(rirs) < max_n_rirs:
         raise RuntimeError("Need at least two RIR files in data/rir for this demo")
 
     # Ensure RIRs have same sample rate as audio
@@ -222,16 +223,12 @@ if __name__ == "__main__":
 
     # Define RIR sequence and start times (seconds)
     # Example: use RIR 0 from 0s, switch to RIR 1 at halfway through the audio
-    rir_indices = [0, 1]
-    start_times_s = [0.0, duration_s / 2.0]
+    rir_indices = [int(k) for k in np.arange(max_n_rirs)]
+    start_times_s = [0.0, duration_s / 3.0, duration_s / 3.0 * 2]
 
     # Simulate
     y, _ = simulate_time_varying_rir(audio, sr, rirs, rir_indices, start_times_s, window_ms=100, hop_ms=50)
     y = y*rms(audio)/rms(y)  # normalize output to input RMS
-
-    # Save result
-    #save_audio(out_path, y, sr)
-    #print(f"Saved simulated time-varying output to: {out_path}")
 
     # Plot results
     time_axis = np.arange(0, len(y)) / sr
@@ -247,3 +244,7 @@ if __name__ == "__main__":
     plt.title("Input and Time-Varying RIR Output")
     plt.legend()
     plt.show()
+
+    # Save result
+    #save_audio(out_path, y, sr)
+    #print(f"Saved simulated time-varying output to: {out_path}")
