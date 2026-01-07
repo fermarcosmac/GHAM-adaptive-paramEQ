@@ -4,8 +4,9 @@ from pathlib import Path
 import torch
 import torchaudio
 # Ensure the workspace root is first on sys.path so the local package is imported
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+root = Path(__file__).resolve().parent.parent  # src -> repo root
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "lib"))
 import local_dasp_pytorch as dasp_pytorch
 import matplotlib.pyplot as plt
 

@@ -14,17 +14,10 @@ Behavior:
   with that RIR. The convolved chunks are overlap-added into the output
   buffer.
 
-This is a starting skeleton; next steps could add crossfading, adaptive
-filtering/estimation, batch FFT convolution optimizations, GPU acceleration,
-or variable window sizes.
-
 Dependencies:
 - numpy
 - scipy
 - soundfile (pysoundfile)
-
-Install (if needed):
-    pip install numpy scipy soundfile
 
 """
 
@@ -100,6 +93,8 @@ def _active_rir_index_for_time(start_times_s: List[float], t: float) -> int:
     """Given a sorted list of start times (seconds) and a time t (seconds),
     return the index of the active RIR. The active RIR is the last index i
     such that start_times_s[i] <= t. If t < start_times_s[0], returns 0.
+
+    Its a private functionality associated with simulate_time_varying_rir().
     """
     # bisect_right returns insertion point; subtract 1 to get index <= t
     i = bisect.bisect_right(start_times_s, t) - 1
@@ -246,5 +241,5 @@ if __name__ == "__main__":
     plt.show()
 
     # Save result
-    #save_audio(out_path, y, sr)
-    #print(f"Saved simulated time-varying output to: {out_path}")
+    save_audio(out_path, y, sr)
+    print(f"Saved simulated time-varying output to: {out_path}")
