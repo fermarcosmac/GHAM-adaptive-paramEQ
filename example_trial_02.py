@@ -6,7 +6,6 @@ import torchaudio
 # Ensure the workspace root is first on sys.path so the local package is imported
 sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-import local_dasp_pytorch as dasp_pytorch
 from local_dasp_pytorch.modules import ParametricEQ
 import matplotlib.pyplot as plt
 import numpy as np

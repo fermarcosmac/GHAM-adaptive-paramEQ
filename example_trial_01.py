@@ -1,11 +1,16 @@
+import os
+import sys
+from pathlib import Path
 import torch
 import torchaudio
-import dasp_pytorch
+# Ensure the workspace root is first on sys.path so the local package is imported
+sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+import local_dasp_pytorch as dasp_pytorch
 import matplotlib.pyplot as plt
 
 # Load audio
-x, sr = torchaudio.load("audio/guitar-riff.wav")
-
+x, sr = torchaudio.load("data/audio/input/guitar-riff.wav")
 # create batch dim
 # (batch_size, n_channels, n_samples)
 x = x.unsqueeze(0)

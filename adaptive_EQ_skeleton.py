@@ -35,6 +35,7 @@ import soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
 import bisect
 import warnings
+import matplotlib.pyplot as plt
 
 
 def load_audio(path: Path) -> Tuple[np.ndarray, int]:
@@ -95,7 +96,7 @@ def ensure_rirs_sample_rate(rirs: List[np.ndarray], rirs_srs: List[int], target_
     return out
 
 
-def _active_rir_index_for_time(start_times_s: List[float], t_s: float) -> int:
+def _active_rir_index_for_time(start_times_s: List[float], t: float) -> int:
     """Given a sorted list of start times (seconds) and a time t (seconds),
     return the index of the active RIR. The active RIR is the last index i
     such that start_times_s[i] <= t. If t < start_times_s[0], returns 0.
@@ -152,44 +153,46 @@ def simulate_time_varying_rir(
 
     n = len(audio)
     max_rir_len = max(len(r) for r in rirs)
+    conv_len = win_len + max_rir_len - 1
     # Output length must accommodate convolution tail
-    out_len = n + max_rir_len
+    out_len = n + win_len +max_rir_len
     y = np.zeros(out_len, dtype=np.float32)
 
     # Frame starts
     frame_starts = list(range(0, n, hop_len))
 
-    for s in frame_starts:
-        e = s + win_len
+    for s in frame_starts:              # start index
+        e = s + win_len                 # end index  
         frame = audio[s:e]
         # If last frame is shorter, pad with zeros
         if len(frame) < win_len:
             frame = np.pad(frame, (0, win_len - len(frame)))
 
         # choose active RIR based on the midpoint of the frame
-        midpoint_s = (s + win_len // 2) / sr
+        midpoint_s = (s + win_len // 2) / sr        # I THINK I CAN DO IT WITH START INDEX!
         # Determine which index in rir_indices is active
         seq_idx = _active_rir_index_for_time(seq_start_times, midpoint_s)
-        rir_idx = rir_indices[seq_idx]
+        rir_idx = rir_indices[seq_idx]      # I THINK THIS IS INNEFICIENT
         rir = rirs[rir_idx]
 
         # convolve frame with the selected RIR
         conv = fftconvolve(frame, rir, mode="full").astype(np.float32)
 
         # add to output at the correct place
-        out_start = s
-        out_end = s + len(conv)
-        y[out_start:out_end] += conv
+        try:
+            y[s:s+conv_len] += conv
+        except:
+            hey=0
 
     # Trim the output to reasonable length (you might prefer to keep the full tail)
     # Here we trim to original audio length + max_rir_len
     y = y[: n + max_rir_len]
 
-    # normalize to avoid clipping (optional naive normalization)
-    peak = np.max(np.abs(y))
-    if peak > 1.0:
-        y = y / peak
     return y, sr
+
+def rms(x: np.ndarray) -> float:
+    """Compute root-mean-square of a 1-D numpy array."""
+    return np.sqrt(np.mean(x**2))
 
 
 def save_audio(path: Path, data: np.ndarray, sr: int) -> None:
@@ -224,7 +227,23 @@ if __name__ == "__main__":
 
     # Simulate
     y, _ = simulate_time_varying_rir(audio, sr, rirs, rir_indices, start_times_s, window_ms=100, hop_ms=50)
+    y = y*rms(audio)/rms(y)  # normalize output to input RMS
 
     # Save result
-    save_audio(out_path, y, sr)
-    print(f"Saved simulated time-varying output to: {out_path}")
+    #save_audio(out_path, y, sr)
+    #print(f"Saved simulated time-varying output to: {out_path}")
+
+    # Plot results
+    time_axis = np.arange(0, len(y)) / sr
+    plt.figure()
+    plt.plot(time_axis[:len(audio)],audio, label="Input")
+    plt.plot(time_axis, y, label="Variable Room Output")
+    # draw vertical change-point lines, add label only once
+    for i, xt in enumerate(start_times_s):
+        if i == 0:
+            pass # First RIR is not a "change"
+        else:
+            plt.axvline(xt, color="red", linestyle="--")
+    plt.title("Input and Time-Varying RIR Output")
+    plt.legend()
+    plt.show()
