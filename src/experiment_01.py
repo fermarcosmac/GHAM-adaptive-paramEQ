@@ -1,8 +1,14 @@
+import sys
 from pathlib import Path
 from typing import Tuple
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
 import numpy as np
+# Ensure the workspace root is first on sys.path so the local package is imported
+root = Path(__file__).resolve().parent.parent  # src -> repo root
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "lib"))
+from local_dasp_pytorch.modules import ParametricEQ
 from utils import (
     load_audio,
     save_audio,
@@ -12,14 +18,6 @@ from utils import (
     simulate_time_varying_rir,
     rms,
 )
-
-
-
-
-
-
-# Take all the code above to utils.py! TODO
-
 
 
 
@@ -46,7 +44,11 @@ if __name__ == "__main__":
     rir_init = rirs[0]
     EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=6)
 
-    
+    # Prepare differentiable EQ module with initial compensation parameters
+    EQ = ParametricEQ(sample_rate=sr)
+    # TODO
+    dasp_param_dict = EQ_comp_dict['eq_params'] # change the values from np.arrays to torch.tensors, keeping the same keys
+    EQ.clip_normalize_param_dict(dasp_param_dict)
 
     # Playback simulation:
     #    - Static room - no EQ

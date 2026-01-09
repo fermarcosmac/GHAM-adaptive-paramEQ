@@ -7,7 +7,7 @@ from .functional import (
     noise_shaped_reverberation,
 )
 
-from typing import Dict, List
+from typing import Dict, Tuple
 
 
 def denormalize(norm_val, max_val, min_val):
@@ -89,6 +89,65 @@ class Processor:
             )
             denorm_param_dict[param_name] = param_val_denorm
         return denorm_param_dict
+
+
+
+    def clip_normalize_param_dict(self, denorm_param_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
+        """
+        Clip denormalized processor parameters to valid ranges and
+        re-normalize them to (0, 1).
+    
+        Args:
+            processor:
+                Processor instance with attribute `param_ranges`,
+                a dict {param_name: (min_val, max_val)}.
+            denorm_param_dict:
+                Dictionary of denormalized parameters (real units),
+                each value a torch.Tensor of shape (bs,).
+    
+        Returns:
+            clipped_param_dict:
+                Dictionary of denormalized but clipped parameters.
+            param_tensor:
+                Normalized parameter tensor of shape (bs, num_params),
+                ordered according to processor.param_ranges.keys().
+        """
+        clipped_param_dict = {}
+        norm_list = []
+    
+        # Infer batch size from first parameter
+        first_key = next(iter(denorm_param_dict))
+        bs = denorm_param_dict[first_key].shape[0]
+    
+        for name in self.param_ranges.keys():
+            if name not in denorm_param_dict:
+                raise KeyError(f"Missing parameter '{name}' in denorm_param_dict")
+    
+            minv, maxv = self.param_ranges[name]
+            v = denorm_param_dict[name]
+    
+            if not isinstance(v, torch.Tensor):
+                v = torch.tensor(v)
+    
+            # Ensure shape (bs,)
+            v = v.view(bs)
+    
+            min_t = torch.tensor(minv, device=v.device, dtype=v.dtype)
+            max_t = torch.tensor(maxv, device=v.device, dtype=v.dtype)
+    
+            # Clip in real units
+            clipped_val = torch.clamp(v, min_t, max_t)
+            clipped_param_dict[name] = clipped_val
+    
+            # Normalize to (0, 1)
+            norm = (clipped_val - min_t) / (max_t - min_t)
+            norm_list.append(norm)
+    
+        # Stack into (bs, num_params)
+        param_tensor = torch.stack(norm_list, dim=1)
+    
+        return clipped_param_dict, param_tensor
+
 
 
 class Gain(Processor):
