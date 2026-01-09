@@ -1,5 +1,6 @@
+import sys
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Callable, Tuple, Optional
 import numpy as np
 import soundfile as sf
 from scipy.signal import fftconvolve, resample_poly
@@ -8,6 +9,13 @@ import bisect
 import warnings
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
+import torchaudio
+# Ensure the workspace root is first on sys.path so the local package is imported
+root = Path(__file__).resolve().parent.parent  # src -> repo root
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "lib"))
+from local_dasp_pytorch.modules import ParametricEQ
 
 
 
@@ -98,10 +106,151 @@ def _active_rir_index_for_time(start_times_s: List[float], t: float) -> int:
     Its a private functionality associated with simulate_time_varying_rir().
     """
     # bisect_right returns insertion point; subtract 1 to get index <= t
-    i = bisect.bisect_right(start_times_s, t) - 1
-    if i < 0:
+    if len(start_times_s) == 0:
+        raise ValueError("start_times must be non-empty")
+    idx = bisect.bisect_right(start_times_s, t) - 1
+    if idx < 0:
         return 0
-    return i
+    if idx >= len(start_times_s):
+        return len(start_times_s) - 1
+    return idx
+
+
+
+
+
+
+def simulate_time_varying_process(
+    audio: torch.Tensor,
+    sr: int,
+    rirs: List[torch.Tensor],
+    rir_indices: List[int],
+    switch_times_s: List[float],
+    process_fn: Optional[Callable[[torch.Tensor, int, torch.Tensor, int, int], torch.Tensor]] = None,
+    EQ: ParametricEQ = None,
+    controller: EQController_dasp = None,   # TODO Controller class to be defined. It holds state information and methods for updating parameters
+    logger: EQLogger = None,                # TODO Logger class to be defined. It handles logging of parameters and performance metrics. Maybe it should be an attribute of the Controller!
+    window_ms: float = 100.0,
+    hop_ms: float = 50.0,
+) -> Tuple[torch.Tensor, int]:
+    """
+    Torch version of simulate_time_varying_process: operates entirely on torch.Tensors.
+
+    Arguments (same semantics as the NumPy version):
+        audio: 1-D or 2-D torch.Tensor (if 2-D, will be flattened). Expected dtype float32.
+        sr: sample rate (int)
+        rirs: list of 1-D torch.Tensors (float32) containing RIRs (resampled to sr)
+        rir_indices: list of indices into `rirs` indicating the sequence of RIRs
+        start_times_s: list of start times in seconds for each corresponding index.
+                       Must be same length as rir_indices, sorted ascending, non-negative.
+        process_fn: callable(frame, sr, rir, frame_start, frame_idx) -> processed_frame (torch.Tensor).
+                    If None, defaults to FFT-based convolution using torch.fft (frame * rir).
+        window_ms, hop_ms: analysis window/hop in milliseconds.
+
+    Returns:
+        y: processed audio as torch.Tensor (1-D, float32)
+        sr: sample rate (int)
+    """
+    # --- input validation & conversion ---
+    if isinstance(audio, torch.Tensor):
+        audio_t = audio.detach()
+    else:
+        audio_t = torch.as_tensor(audio)
+
+    # Require mono audio
+    if audio_t.ndim != 1:
+        raise ValueError(
+            f"simulate_time_varying_process expects mono audio (1-D tensor), "
+            f"but got shape {tuple(audio_t.shape)}"
+        )
+    # Ensure float32
+    audio_t = audio_t.to(dtype=torch.float32)
+
+    # Convert rirs to torch tensors on same device/dtype
+    device = audio_t.device
+    rirs_t: List[torch.Tensor] = []
+    for r in rirs:
+        if not isinstance(r, torch.Tensor):
+            r_t = torch.as_tensor(r, dtype=torch.float32, device=device)
+        else:
+            r_t = r.to(device=device, dtype=torch.float32)
+        rirs_t.append(r_t)
+
+    # Validate start times / indices
+    assert len(rir_indices) == len(switch_times_s), "rir_indices and switch_times_s must have same length"
+    if any(t < 0 for t in switch_times_s):
+        raise ValueError("switch_times_s must be non-negative")
+    if any(switch_times_s[i] > switch_times_s[i + 1] for i in range(len(switch_times_s) - 1)):
+        raise ValueError("switch_times_s must be sorted ascending")
+    # Default processing function: FFT convolution using torch (reproduction through LEM system)
+    if process_fn is None:
+        def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int) -> torch.Tensor:
+            # frame and rir_ are 1-D tensors on same device/dtype
+            return torchaudio.functional.fftconvolve(frame, rir_)
+        process_fn = default_process
+
+    # Convert ms to samples (ints)
+    win_len = int(round(window_ms * sr / 1000.0))
+    hop_len = int(round(hop_ms * sr / 1000.0))
+    if win_len <= 0 or hop_len <= 0:
+        raise ValueError("window_ms and hop_ms must be positive and produce non-zero lengths")
+
+    n = int(audio_t.shape[0])
+    max_rir_len = max((r.shape[0] for r in rirs_t), default=0)
+
+    # Output buffer: original length + max tail + window length (safe)
+    out_len = n + max_rir_len + win_len
+    y = torch.zeros(out_len, dtype=torch.float32, device=device)
+
+    # Frame start indices
+    frame_starts = list(range(0, n, hop_len))
+
+    for frame_idx, s in enumerate(frame_starts):
+        e = s + win_len
+        if e <= n:
+            frame = audio_t[s:e]
+        else:
+            # partial last frame, pad to win_len
+            valid = audio_t[s:n]
+            pad_len = win_len - valid.shape[0]
+            frame = torch.nn.functional.pad(valid, (0, pad_len), mode='constant', value=0.0)
+
+        # choose active RIR based on midpoint of the frame in seconds
+        midpoint_s = (s + win_len // 2) / float(sr)
+        seq_idx = _active_rir_index_for_time(switch_times_s, midpoint_s)
+        rir_idx = rir_indices[seq_idx]
+        rir = rirs_t[rir_idx]
+
+        # call user-provided process function (expects torch tensors)
+        processed = process_fn(frame, sr, rir, s, frame_idx)
+        if processed is None:
+            continue
+
+        # ensure 1-D tensor float32 on correct device
+        if not isinstance(processed, torch.Tensor):
+            processed = torch.as_tensor(processed, device=device, dtype=torch.float32)
+        else:
+            processed = processed.to(device=device, dtype=torch.float32)
+
+        len_proc = int(processed.shape[0])
+        end_out = s + len_proc
+
+        if s >= out_len:
+            # frame starts beyond buffer - skip
+            continue
+
+        if end_out > out_len:
+            keep_len = out_len - s
+            if keep_len > 0:
+                y[s:out_len] += processed[:keep_len]
+        else:
+            y[s:end_out] += processed
+
+    # Trim final output to original length + max_rir_len (you may adjust)
+    final_len = n + max_rir_len
+    y = y[:final_len]
+
+    return y, sr
 
 
 
@@ -174,7 +323,7 @@ def simulate_time_varying_rir(
         rir_idx = rir_indices[seq_idx]      # I THINK THIS IS INNEFICIENT
         rir = rirs[rir_idx]
 
-        # convolve frame with the selected RIR
+        # convolve frame with the selected RIR. Here I should have the process() function!
         conv = fftconvolve(frame, rir, mode="full").astype(np.float32)
 
         # add to output at the correct place
