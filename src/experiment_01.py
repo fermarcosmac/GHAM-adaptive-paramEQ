@@ -1,9 +1,6 @@
 import sys
 from pathlib import Path
-from typing import Tuple
-import matplotlib.pyplot as plt
-from scipy.optimize import least_squares
-import numpy as np
+import torch
 # Ensure the workspace root is first on sys.path so the local package is imported
 root = Path(__file__).resolve().parent.parent  # src -> repo root
 sys.path.insert(0, str(root))
@@ -46,9 +43,8 @@ if __name__ == "__main__":
 
     # Prepare differentiable EQ module with initial compensation parameters
     EQ = ParametricEQ(sample_rate=sr)
-    # TODO
-    dasp_param_dict = EQ_comp_dict['eq_params'] # change the values from np.arrays to torch.tensors, keeping the same keys
-    EQ.clip_normalize_param_dict(dasp_param_dict)
+    dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
+    _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
 
     # Playback simulation:
     #    - Static room - no EQ
