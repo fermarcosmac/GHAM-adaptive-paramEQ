@@ -146,6 +146,7 @@ def simulate_time_varying_process(
     hop_ms: float = 50.0,
 ) -> Tuple[torch.Tensor, int]:
     """
+    TODO: redo documentation for this function.
     Torch version of simulate_time_varying_process: operates entirely on torch.Tensors.
 
     Arguments (same semantics as the NumPy version):
@@ -198,12 +199,20 @@ def simulate_time_varying_process(
     
     # Default processing function: FFT convolution using torch (reproduction through LEM system)
     if process_fn is None:
-        def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int, EQ: ParametricEQ) -> torch.Tensor:
+        def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int, EQ: ParametricEQ, controller: EQController_dasp) -> torch.Tensor:
+            
             # Apply compensation EQ if provided
             if  EQ is not None:
-                frame = EQ.process_normalized(frame, controller.current_params)
-                # frame and rir_ are 1-D tensors on same device/dtype
-            return torchaudio.functional.fftconvolve(frame, rir_)
+                EQed_frame = EQ.process_normalized(frame, controller.current_params)
+            
+            # Pass audio through LEM system (represented by RIR)
+            mic_signal = torchaudio.functional.fftconvolve(EQed_frame, rir_)
+
+            #
+            if controller is not None:
+                controller.update(in_frame=frame, EQed_frame=EQed_frame, out_frame=mic_signal)
+            
+            return mic_signal
         process_fn = default_process
 
     # Convert ms to samples (ints)
@@ -239,7 +248,7 @@ def simulate_time_varying_process(
         rir = rirs_t[rir_idx]
 
         # call user-provided process function (expects torch tensors)
-        processed = process_fn(frame, sr, rir, s, frame_idx, EQ)
+        processed = process_fn(frame, sr, rir, s, frame_idx, EQ, controller)
 
         if processed is None:
             continue
