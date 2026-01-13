@@ -161,7 +161,9 @@ def sosfilt_via_fsm(sos: torch.Tensor, x: torch.Tensor):
     y = freqdomain_fir(x, H, n_fft)
 
     # crop
-    y = y[..., : x.shape[-1]]
+    #y = y[..., : x.shape[-1]]
+    # I removed the crop because it introdices audible artifacts in short frame processing
+    # It would be more efficient to to know the memory of the SOS filter and crop accordingly...
 
     return y
 

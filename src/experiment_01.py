@@ -15,7 +15,8 @@ from utils import (
     load_rirs,
     ensure_rirs_sample_rate,
     simulate_time_varying_process,
-    rms
+    rms,
+    save_audio
 )
 
 
@@ -122,7 +123,16 @@ if __name__ == "__main__":
     plt.ylabel("Normalized Amplitude")
     plt.legend()
     plt.show()
+    # Save audio files to output directory
+    output_dir = base / "data" / "audio" / "output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    save_audio(output_dir / "input.wav", input_1d, sr)
+    save_audio(output_dir / "output_no_eq.wav", y_noEQ_1d, sr)
+    save_audio(output_dir / "output_with_eq.wav", y_1d, sr)
+    print(f"Audio files saved to {output_dir}")
 
+
+    
     #    - Static room - no EQ
     #    - Static room + initial EQ
     #    - Dynamic room - no EQ

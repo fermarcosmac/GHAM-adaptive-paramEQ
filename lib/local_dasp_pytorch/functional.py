@@ -267,7 +267,7 @@ def parametric_eq(
     x_out = signal.sosfilt_via_fsm(sos, x)
 
     # move channels back
-    x_out = x_out.view(bs, chs, seq_len)
+    x_out = x_out.view(bs, chs, -1)
 
     return x_out
 

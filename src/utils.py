@@ -239,12 +239,6 @@ def simulate_time_varying_process(
         else:
             processed = processed.to(device=device, dtype=torch.float32)
 
-        # Ensure processed is 3D (1, 1, N)
-        #if processed.ndim == 1:
-        #    processed = processed.unsqueeze(0).unsqueeze(0)
-        #elif processed.ndim == 2:
-        #    processed = processed.unsqueeze(0)
-
         len_proc = int(processed.shape[-1])
         end_out = s + len_proc
 
