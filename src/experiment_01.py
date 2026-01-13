@@ -30,13 +30,13 @@ if __name__ == "__main__":
 
     # Set paths
     base = Path(".")
-    audio_path = base / "data" / "audio" / "input" / "guitar-riff.wav"
+    audio_path = base / "data" / "audio" / "input" / "onde_day_funk.wav"
     rir_dir = base / "data" / "rir"
 
     # Set experiment parameters
     n_rirs = 2  # number of RIRs to use
     switch_times_norm = [0.0, 0.5]  # times to switch RIRs (normalized)
-    ROI = [150.0, 14000.0]  # region of interest for EQ compensation (Hz)
+    ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
     input, sr = load_audio(audio_path) # input audio signal (nsures mono)
@@ -123,16 +123,17 @@ if __name__ == "__main__":
     plt.ylabel("Normalized Amplitude")
     plt.legend()
     plt.show()
+
     # Save audio files to output directory
     output_dir = base / "data" / "audio" / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    save_audio(output_dir / "input.wav", input_1d, sr)
-    save_audio(output_dir / "output_no_eq.wav", y_noEQ_1d, sr)
-    save_audio(output_dir / "output_with_eq.wav", y_1d, sr)
+    save_audio(output_dir / "input.wav", input_1d_norm, sr)
+    save_audio(output_dir / "output_no_eq.wav", y_noEQ_1d_norm, sr)
+    save_audio(output_dir / "output_with_eq.wav", y_1d_norm, sr)
     print(f"Audio files saved to {output_dir}")
 
 
-    
+
     #    - Static room - no EQ
     #    - Static room + initial EQ
     #    - Dynamic room - no EQ

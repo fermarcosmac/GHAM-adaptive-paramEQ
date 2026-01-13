@@ -43,8 +43,19 @@ def load_audio(path: Path) -> Tuple[np.ndarray, int]:
 
 
 def save_audio(path: Path, data: np.ndarray, sr: int) -> None:
-    """Save audio as 32-bit float WAV (or default by soundfile)."""
-    sf.write(str(path), data, sr)
+    """Save audio as 32-bit float WAV (or default by soundfile).
+    
+    Scales audio if peak value exceeds [-1, 1] range to prevent clipping.
+    """
+    max_val = np.max(np.abs(data))
+    if max_val > 1.0:
+        # Scale audio to prevent clipping
+        scaled_data = data / max_val
+        warnings.warn(f"Audio exceeded [-1, 1] range (peak={max_val:.3f}). Scaled by {1/max_val:.3f}.")
+    else:
+        scaled_data = data
+    
+    sf.write(str(path), scaled_data, sr)
 
 
 
