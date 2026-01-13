@@ -138,7 +138,7 @@ def simulate_time_varying_process(
     Torch version of simulate_time_varying_process: operates entirely on torch.Tensors.
 
     Arguments (same semantics as the NumPy version):
-        audio: 1-D or 2-D torch.Tensor (if 2-D, will be flattened). Expected dtype float32.
+        audio: 3-D torch.Tensor with shape (1, 1, N). Expected dtype float32.
         sr: sample rate (int)
         rirs: list of 1-D torch.Tensors (float32) containing RIRs (resampled to sr)
         rir_indices: list of indices into `rirs` indicating the sequence of RIRs
@@ -158,12 +158,13 @@ def simulate_time_varying_process(
     else:
         audio_t = torch.as_tensor(audio)
 
-    # Require mono audio
-    if audio_t.ndim != 1:
+    # Require mono audio with shape (1, 1, N)
+    if audio_t.ndim != 3 or audio_t.shape[0] != 1 or audio_t.shape[1] != 1:
         raise ValueError(
-            f"simulate_time_varying_process expects mono audio (1-D tensor), "
+            f"simulate_time_varying_process expects mono audio with shape (1, 1, N), "
             f"but got shape {tuple(audio_t.shape)}"
         )
+    
     # Ensure float32
     audio_t = audio_t.to(dtype=torch.float32)
 
@@ -186,8 +187,11 @@ def simulate_time_varying_process(
     
     # Default processing function: FFT convolution using torch (reproduction through LEM system)
     if process_fn is None:
-        def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int) -> torch.Tensor:
-            # frame and rir_ are 1-D tensors on same device/dtype
+        def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int, EQ: ParametricEQ) -> torch.Tensor:
+            # Apply compensation EQ if provided
+            if  EQ is not None:
+                frame = EQ.process_normalized(frame, controller.current_params)
+                # frame and rir_ are 1-D tensors on same device/dtype
             return torchaudio.functional.fftconvolve(frame, rir_)
         process_fn = default_process
 
@@ -197,12 +201,12 @@ def simulate_time_varying_process(
     if win_len <= 0 or hop_len <= 0:
         raise ValueError("window_ms and hop_ms must be positive and produce non-zero lengths")
 
-    n = int(audio_t.shape[0])
+    n = int(audio_t.shape[-1])
     max_rir_len = max((r.shape[0] for r in rirs_t), default=0)
 
     # Output buffer: original length + max tail + window length (safe)
     out_len = n + max_rir_len + win_len
-    y = torch.zeros(out_len, dtype=torch.float32, device=device)
+    y = torch.zeros(1, 1, out_len, dtype=torch.float32, device=device)
 
     # Frame start indices
     frame_starts = list(range(0, n, hop_len))
@@ -210,11 +214,11 @@ def simulate_time_varying_process(
     for frame_idx, s in enumerate(frame_starts):
         e = s + win_len
         if e <= n:
-            frame = audio_t[s:e]
+            frame = audio_t[:, :, s:e]
         else:
             # partial last frame, pad to win_len
-            valid = audio_t[s:n]
-            pad_len = win_len - valid.shape[0]
+            valid = audio_t[:, :, s:n]
+            pad_len = win_len - valid.shape[-1]
             frame = torch.nn.functional.pad(valid, (0, pad_len), mode='constant', value=0.0)
 
         # choose active RIR based on midpoint of the frame in seconds
@@ -224,17 +228,24 @@ def simulate_time_varying_process(
         rir = rirs_t[rir_idx]
 
         # call user-provided process function (expects torch tensors)
-        processed = process_fn(frame, sr, rir, s, frame_idx)
+        processed = process_fn(frame, sr, rir, s, frame_idx, EQ)
+
         if processed is None:
             continue
 
-        # ensure 1-D tensor float32 on correct device
+        # ensure 3-D tensor float32 on correct device
         if not isinstance(processed, torch.Tensor):
             processed = torch.as_tensor(processed, device=device, dtype=torch.float32)
         else:
             processed = processed.to(device=device, dtype=torch.float32)
 
-        len_proc = int(processed.shape[0])
+        # Ensure processed is 3D (1, 1, N)
+        #if processed.ndim == 1:
+        #    processed = processed.unsqueeze(0).unsqueeze(0)
+        #elif processed.ndim == 2:
+        #    processed = processed.unsqueeze(0)
+
+        len_proc = int(processed.shape[-1])
         end_out = s + len_proc
 
         if s >= out_len:
@@ -244,13 +255,13 @@ def simulate_time_varying_process(
         if end_out > out_len:
             keep_len = out_len - s
             if keep_len > 0:
-                y[s:out_len] += processed[:keep_len]
+                y[:, :, s:out_len] += processed[:, :, :keep_len]
         else:
-            y[s:end_out] += processed
+            y[:, :, s:end_out] += processed
 
     # Trim final output to original length + max_rir_len (you may adjust)
     final_len = n + max_rir_len
-    y = y[:final_len]
+    y = y[:, :, :final_len]
 
     return y, sr
 

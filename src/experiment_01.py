@@ -15,6 +15,7 @@ from utils import (
     load_rirs,
     ensure_rirs_sample_rate,
     simulate_time_varying_process,
+    rms
 )
 
 
@@ -37,7 +38,7 @@ if __name__ == "__main__":
     ROI = [150.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
-    input, sr = load_audio(audio_path) # input audio signal
+    input, sr = load_audio(audio_path) # input audio signal (nsures mono)
     rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
     rirs = ensure_rirs_sample_rate(rirs, rirs_srs, sr)
 
@@ -50,9 +51,17 @@ if __name__ == "__main__":
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
 
+    # Transform audio and RIRs to Torch tensors on appropriate device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    input = torch.as_tensor(input, dtype=torch.float32, device=device).view(1,1,-1)
+    rirs = [torch.as_tensor(rir, dtype=torch.float32, device=device).view(1,1,-1) for rir in rirs]
+
     # Prepare controller and logger for adaptive EQ (to be defined)
     # TODO
-    EQController_dasp = EQController_dasp() # Will take EQ module with its initial parameters and implement adaptation logic
+    # EQController_dasp will take EQ module with its initial parameters and implement adaptation logic
+    EQController_dasp = EQController_dasp(
+        EQ = EQ,
+        init_params_tensor = init_params_tensor)
     EQLogger = EQLogger()                   # Maybe it should be an attribute of the EQController_dasp class...
 
     # I also have to define the process_fn, which should:
@@ -71,19 +80,46 @@ if __name__ == "__main__":
         sr=sr,
         rirs=rirs,
         rir_indices=rir_indices,
-        start_times_s=switch_times_s,
+        switch_times_s=switch_times_s,
         EQ=EQ,
         controller=EQController_dasp,
         logger=EQLogger,)
+    
+    # For comparison purposes, also simulate withoput compensation EQ
+    y_noEQ, sr = simulate_time_varying_process(
+        audio=input,
+        sr=sr,
+        rirs=rirs,
+        rir_indices=rir_indices,
+        switch_times_s=switch_times_s,
+        EQ=None,
+        controller=None,
+        logger=EQLogger,)
 
     # plot and show input, output signals and switch times
-    time_axis = np.arange(0, len(y)) / sr
-    plt.figure()
-    plt.plot(time_axis[:len(input)],input, label="Input")
-    plt.plot(time_axis, y.detach().numpy(), label="Variable Room Output")
+    # Extract audio data from 3D tensors (1, 1, N) -> 1D
+    input_1d = input.squeeze().detach().cpu().numpy()
+    y_1d = y.squeeze().detach().cpu().numpy()
+    y_noEQ_1d = y_noEQ.squeeze().detach().cpu().numpy()
+    
+    # Normalize signals for comparison using RMS normalization
+    rms_in = rms(input_1d)
+    rms_y = rms(y_1d)
+    rms_y_noEQ = rms(y_noEQ_1d)
+    input_1d_norm = input_1d / rms_in
+    y_1d_norm = y_1d / rms_y
+    y_noEQ_1d_norm = y_noEQ_1d / rms_y_noEQ
+    
+    time_axis = np.arange(0, len(y_1d_norm)) / sr
+    plt.figure(figsize=(12, 6))
+    plt.plot(np.arange(0, len(input_1d_norm)) / sr, input_1d_norm, label="Input", alpha=0.7)
+    plt.plot(time_axis, y_noEQ_1d_norm, label="Variable Room Output (No EQ)", alpha=0.7)
+    plt.plot(time_axis, y_1d_norm, label="Variable Room Output (With EQ)", alpha=0.7)
     for i, xt in enumerate(switch_times_s):
         plt.axvline(x=xt, color='k', linestyle='--', label="RIR Switch" if i==0 else None)
-    plt.title("Input and Variable Room Output Signals")
+    plt.title("Input and Variable Room Output Signals (RMS Normalized)")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Normalized Amplitude")
     plt.legend()
     plt.show()
 
