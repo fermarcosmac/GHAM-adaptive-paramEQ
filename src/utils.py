@@ -166,7 +166,7 @@ def simulate_time_varying_process(
     """
     # --- input validation & conversion ---
     if isinstance(audio, torch.Tensor):
-        audio_t = audio.detach()
+        audio_t = audio  # Keep gradients enabled (don't detach)
     else:
         audio_t = torch.as_tensor(audio)
 
@@ -203,7 +203,9 @@ def simulate_time_varying_process(
             
             # Apply compensation EQ if provided
             if  EQ is not None:
-                EQed_frame = EQ.process_normalized(frame, controller.current_params)
+                EQed_frame = EQ.process_normalized(frame, controller.params)
+            else:
+                EQed_frame = frame
             
             # Pass audio through LEM system (represented by RIR)
             mic_signal = torchaudio.functional.fftconvolve(EQed_frame, rir_)

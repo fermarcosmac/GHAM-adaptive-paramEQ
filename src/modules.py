@@ -10,13 +10,13 @@ import matplotlib.pyplot as plt
 class EQController_dasp:
     def __init__(self, EQ, init_params_tensor):
         self.EQ = EQ                                                            # ParametricEQ object (dasp_pytorch)
-        # TODO: this has to be a Torch Parameter!
-        self.current_params: torch.nn.Parameter = init_params_tensor                  # (1 x n_params) torch tensor
-        self.state: dict = {
-            "optimizer": torch.optim.SGD([self.current_params], lr=0.01)
-        }                                                   # dictionary to hold any state information
-        self.prev_params: torch.Tensor = torch.zeros_like(init_params_tensor)   # (1 x n_params) torch tensor
+        # Create as nn.Parameter so it's optimizable by PyTorch optimizer
+        self.params = torch.nn.Parameter(init_params_tensor.clone().detach().requires_grad_(True))  # (1 x n_params) torch Parameter
+        self.state: dict = {}                                                   # dictionary to hold any state information
+        self.prev_params: torch.Tensor = torch.zeros_like(self.params)   # (1 x n_params) torch tensor
         self.method: str = "TD-FxLMS"                                           # adaptation method (placeholder)
+        # The optimizer should depend on the chosen method TODO
+        self.optimizer = torch.optim.SGD([self.params], lr=0.01)        # optimizer for parameter updates
 
     # Dont use getters or setters! Just make sure properties are public.
     
@@ -24,19 +24,32 @@ class EQController_dasp:
         if self.method == "TD-FxLMS":
             self._update_TD_FxLMS(in_frame, EQed_frame, out_frame)
         else:   # placeholder (no adaptation logic)
-            new_params = self.current_params
-            self.prev_params = self.current_params
-            self.current_params = new_params
+            new_params = self.params
+            self.prev_params = self.params
+            self.params = new_params
 
     def _update_TD_FxLMS(self, in_frame: torch.Tensor, EQed_frame: torch.Tensor, out_frame: torch.Tensor):
         # Placeholder adaptation logic for TD-FxLMS
-        learning_rate = 0.01
-        loss = torch.functional.mse_loss(EQed_frame, out_frame)
-        loss.backward()
 
-        new_params = self.current_params - learning_rate * gradient
-        self.prev_params = self.current_params
-        self.current_params = new_params
+        # Track parameters prior to step
+        self.prev_params = self.params.clone()
+
+        # Match length of EQed_frame to out_frame if needed (only for loss evaluation)
+        min_len = min(in_frame.shape[-1], out_frame.shape[-1])
+
+        # TODO: WE NEED A DELAYED VERSION OF THE INPUT TO DO TIME DOMAIN LOSS
+
+        # Compute Time-Domain loss
+        loss = torch.nn.functional.mse_loss(in_frame[..., :min_len], out_frame[..., :min_len])
+
+        # Step the pytorch optimizer (updates self.params)
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        # Clip parameters to [0, 1] range to ensure normalized values (preserves gradient flow)
+        with torch.no_grad():
+            self.params.clamp_(0.0, 1.0)
 
 
 # TODO
