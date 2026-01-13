@@ -8,6 +8,7 @@ root = Path(__file__).resolve().parent.parent  # src -> repo root
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
 from local_dasp_pytorch.modules import ParametricEQ
+from modules import EQController_dasp, EQLogger
 from utils import (
     load_audio,
     get_compensation_EQ_params,
@@ -51,8 +52,8 @@ if __name__ == "__main__":
 
     # Prepare controller and logger for adaptive EQ (to be defined)
     # TODO
-    EQController_dasp = None # Will take EQ module with its initial parameters and implement adaptation logic
-    EQLogger = None          # Maybe it should be an attribute of the EQController_dasp class...
+    EQController_dasp = EQController_dasp() # Will take EQ module with its initial parameters and implement adaptation logic
+    EQLogger = EQLogger()                   # Maybe it should be an attribute of the EQController_dasp class...
 
     # I also have to define the process_fn, which should:
     #     - take in input frame, sr, rir, frame_start, frame_idx

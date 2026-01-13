@@ -16,6 +16,7 @@ root = Path(__file__).resolve().parent.parent  # src -> repo root
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
 from local_dasp_pytorch.modules import ParametricEQ
+from modules import EQController_dasp, EQLogger
 
 
 
@@ -182,6 +183,7 @@ def simulate_time_varying_process(
         raise ValueError("switch_times_s must be non-negative")
     if any(switch_times_s[i] > switch_times_s[i + 1] for i in range(len(switch_times_s) - 1)):
         raise ValueError("switch_times_s must be sorted ascending")
+    
     # Default processing function: FFT convolution using torch (reproduction through LEM system)
     if process_fn is None:
         def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int) -> torch.Tensor:
