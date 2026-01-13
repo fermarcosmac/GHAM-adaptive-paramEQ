@@ -38,6 +38,7 @@ class EQController_dasp:
         min_len = min(in_frame.shape[-1], out_frame.shape[-1])
 
         # TODO: WE NEED A DELAYED VERSION OF THE INPUT TO DO TIME DOMAIN LOSS
+        # It also doesn't make musch sense to use time-domain loss
 
         # Compute Time-Domain loss
         loss = torch.nn.functional.mse_loss(in_frame[..., :min_len], out_frame[..., :min_len])
