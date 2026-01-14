@@ -20,13 +20,20 @@ from utils import (
 )
 
 
-
-# Define process function (that defines the nature of the experiment) here!
+# Define configuration for EQController_dasp here for now (better to pass it from file)
+EQController_config = {
+    "method": "TD-FxLMS",           # adaptation method
+    "estLEM_desired_length": 4096,  # memory length for LEM estimate
+    "estLEM_sustain_ms": 1000,       # [ms] time to sustain previous LEM estimate
+    "estLEM_ridge_lambda": 10.0,    # Ridge L2 regularization parameter for LEM estimation
+}
 
 
 #%% MAIN SCRIPT
 
 if __name__ == "__main__":
+
+    #%% CONFIGURATION AND SETUP
 
     # Set paths
     base = Path(".")
@@ -34,8 +41,8 @@ if __name__ == "__main__":
     rir_dir = base / "data" / "rir"
 
     # Set experiment parameters
-    n_rirs = 2  # number of RIRs to use
-    switch_times_norm = [0.0, 0.5]  # times to switch RIRs (normalized)
+    n_rirs = 6  # number of RIRs to use
+    switch_times_norm = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]  # times to switch RIRs (normalized)
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
@@ -59,22 +66,21 @@ if __name__ == "__main__":
 
     # Prepare controller and logger for adaptive EQ (to be defined)
     # TODO
+    logger = EQLogger()  
     # EQController_dasp will take EQ module with its initial parameters and implement adaptation logic
     EQController_dasp = EQController_dasp(
         EQ = EQ,
-        init_params_tensor = init_params_tensor)
-    EQLogger = EQLogger()                   # Maybe it should be an attribute of the EQController_dasp class...
+        init_params_tensor = init_params_tensor,
+        config = EQController_config,
+        logger = logger,
+        roi = ROI,
+    )
+                     # Maybe it should be an attribute of the EQController_dasp class...
 
-    # I also have to define the process_fn, which should:
-    #     - take in input frame, sr, rir, frame_start, frame_idx
-    #     - apply EQ to input frame
-    #     - convolve EQed frame with rir (step 3)
-    #     - update EQ parameters calling controller and updating its state
-    #     - call logger to log parameters and performance
-    #     - return processed frame (the output of step 3)
+    #%% PLAYBACK
 
     # Playback simulation:
-    switch_times_s = [t * (len(input) / sr) for t in switch_times_norm]
+    switch_times_s = [t * (input.shape[-1]/ sr) for t in switch_times_norm]
     rir_indices = list(range(n_rirs))  # use RIRS in order
     y, sr = simulate_time_varying_process(
         audio=input,
@@ -84,7 +90,10 @@ if __name__ == "__main__":
         switch_times_s=switch_times_s,
         EQ=EQ,
         controller=EQController_dasp,
-        logger=EQLogger,)
+        logger=logger,
+        window=4410*2,
+        hop=2205*2,
+        win_hop_units="samples",)
     
     # For comparison purposes, also simulate withoput compensation EQ
     y_noEQ, sr = simulate_time_varying_process(
@@ -95,8 +104,12 @@ if __name__ == "__main__":
         switch_times_s=switch_times_s,
         EQ=None,
         controller=None,
-        logger=EQLogger,)
+        logger=logger,
+        window=4410*2,
+        hop=2205*2,
+        win_hop_units="samples",)
 
+    #%% PLOTS
     # plot and show input, output signals and switch times
     # Extract audio data from 3D tensors (1, 1, N) -> 1D
     input_1d = input.squeeze().detach().cpu().numpy()
@@ -112,6 +125,8 @@ if __name__ == "__main__":
     y_noEQ_1d_norm = y_noEQ_1d / rms_y_noEQ
     
     time_axis = np.arange(0, len(y_1d_norm)) / sr
+    
+    # Plot 1: Audio signals with RIR switch times
     plt.figure(figsize=(12, 6))
     plt.plot(np.arange(0, len(input_1d_norm)) / sr, input_1d_norm, label="Input", alpha=0.7)
     plt.plot(time_axis, y_noEQ_1d_norm, label="Variable Room Output (No EQ)", alpha=0.7)
@@ -122,7 +137,23 @@ if __name__ == "__main__":
     plt.xlabel("Time (s)")
     plt.ylabel("Normalized Amplitude")
     plt.legend()
+    
+    
+    # Plot 2: Loss progression by frames
+    if len(logger.frames_start_samples) > 0:
+        loss_time_axis = np.array(logger.frames_start_samples) / sr  # Convert frame start samples to time
+        plt.figure(figsize=(12, 4))
+        plt.plot(loss_time_axis, logger.loss_by_frames, marker='o', markersize=4, linewidth=1, label="MSE Loss")
+        for i, xt in enumerate(switch_times_s):
+            plt.axvline(x=xt, color='r', linestyle='--', alpha=0.7, label="RIR Switch" if i==0 else None)
+        plt.title("Adaptation Loss Over Time (TD-FxLMS)")
+        plt.xlabel("Time (s)")
+        plt.ylabel("MSE Loss")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
     plt.show()
+
 
     # Save audio files to output directory
     output_dir = base / "data" / "audio" / "output"

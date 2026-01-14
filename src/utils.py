@@ -142,8 +142,9 @@ def simulate_time_varying_process(
     EQ: ParametricEQ = None,
     controller: EQController_dasp = None,   # TODO Controller class to be defined. It holds state information and methods for updating parameters
     logger: EQLogger = None,                # TODO Logger class to be defined. It handles logging of parameters and performance metrics. Maybe it should be an attribute of the Controller!
-    window_ms: float = 100.0,
-    hop_ms: float = 50.0,
+    window: float = 100.0,
+    hop: float = 50.0,
+    win_hop_units: str = "ms",
 ) -> Tuple[torch.Tensor, int]:
     """
     TODO: redo documentation for this function.
@@ -197,7 +198,7 @@ def simulate_time_varying_process(
     if any(switch_times_s[i] > switch_times_s[i + 1] for i in range(len(switch_times_s) - 1)):
         raise ValueError("switch_times_s must be sorted ascending")
     
-    # Default processing function: FFT convolution using torch (reproduction through LEM system)
+    # Default processing function: EQ + LEM + controller update
     if process_fn is None:
         def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int, EQ: ParametricEQ, controller: EQController_dasp) -> torch.Tensor:
             
@@ -210,21 +211,27 @@ def simulate_time_varying_process(
             # Pass audio through LEM system (represented by RIR)
             mic_signal = torchaudio.functional.fftconvolve(EQed_frame, rir_)
 
-            #
+            # Update controller with LEM estimation and parameter adaptation
             if controller is not None:
-                controller.update(in_frame=frame, EQed_frame=EQed_frame, out_frame=mic_signal)
+                controller.update(in_frame=frame, EQed_frame=EQed_frame, out_frame=mic_signal, sr=sr_, frame_start_sample=frame_start)
             
             return mic_signal
         process_fn = default_process
 
     # Convert ms to samples (ints)
-    win_len = int(round(window_ms * sr / 1000.0))
-    hop_len = int(round(hop_ms * sr / 1000.0))
+    if win_hop_units == "ms":
+        win_len = int(round(window * sr / 1000.0))
+        hop_len = int(round(hop * sr / 1000.0))
+    elif win_hop_units == "samples":
+        win_len = int(window) 
+        hop_len = int(hop)
+    else:
+        raise ValueError("win_hop_units must be 'ms' or 'samples'")
     if win_len <= 0 or hop_len <= 0:
         raise ValueError("window_ms and hop_ms must be positive and produce non-zero lengths")
 
     n = int(audio_t.shape[-1])
-    max_rir_len = max((r.shape[0] for r in rirs_t), default=0)
+    max_rir_len = max((r.shape[-1] for r in rirs_t), default=0)
 
     # Output buffer: original length + max tail + window length (safe)
     out_len = n + max_rir_len + win_len
@@ -232,6 +239,17 @@ def simulate_time_varying_process(
 
     # Frame start indices
     frame_starts = list(range(0, n, hop_len))
+    
+    # Create Hann window for COLA (Constant Overlap-Add) with 50% overlap
+    # This ensures amplitude consistency across frame boundaries
+    hann_window = torch.hann_window(win_len, periodic=False, device=device, dtype=torch.float32)
+    
+    print(f"[simulate_time_varying_process] Starting simulation:")
+    print(f"  Audio length: {n} samples ({n/sr:.2f} sec)")
+    print(f"  Frame length: {win_len} samples, Hop: {hop_len} samples")
+    print(f"  Total frames: {len(frame_starts)}")
+    print(f"  Max RIR length: {max_rir_len} samples")
+    print(f"  Using Hann window for COLA overlap-add (50% overlap)")
 
     for frame_idx, s in enumerate(frame_starts):
         e = s + win_len
@@ -243,14 +261,20 @@ def simulate_time_varying_process(
             pad_len = win_len - valid.shape[-1]
             frame = torch.nn.functional.pad(valid, (0, pad_len), mode='constant', value=0.0)
 
+        # Apply Hann window to frame for proper overlap-add reconstruction
+        windowed_frame = frame * hann_window.unsqueeze(0).unsqueeze(0)
+
         # choose active RIR based on midpoint of the frame in seconds
         midpoint_s = (s + win_len // 2) / float(sr)
         seq_idx = _active_rir_index_for_time(switch_times_s, midpoint_s)
         rir_idx = rir_indices[seq_idx]
         rir = rirs_t[rir_idx]
+        
+        # Log progress every 1 frames or for first/last frames
+        print(f"  Frame {frame_idx+1}/{len(frame_starts)} | Time: {midpoint_s:.2f}s | RIR: {rir_idx}")
 
         # call user-provided process function (expects torch tensors)
-        processed = process_fn(frame, sr, rir, s, frame_idx, EQ, controller)
+        processed = process_fn(windowed_frame, sr, rir, s, frame_idx, EQ, controller)
 
         if processed is None:
             continue
@@ -278,6 +302,8 @@ def simulate_time_varying_process(
     # Trim final output to original length + max_rir_len (you may adjust)
     final_len = n + max_rir_len
     y = y[:, :, :final_len]
+    
+    print(f"[simulate_time_varying_process] Simulation complete. Output shape: {y.shape}")
 
     return y, sr
 
@@ -441,6 +467,96 @@ def _get_target_response_comp_EQ(cf: np.ndarray, oa: np.ndarray, ROI: Tuple[floa
         pfit = np.array([0.0, 0.0])
 
     return target_resp, pfit, pdb
+
+
+
+
+def octave_average_torch(f: torch.Tensor, resp: torch.Tensor, bpo: int, 
+                         freq_range: Tuple[float, float] = None, b_smooth: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute average power per fractional octave band (PyTorch version).
+    
+    Preserves complex values (e.g., for phase information in frequency responses).
+    Works with PyTorch tensors on GPU/CPU.
+    
+    Based on MATLAB's octaveAverage function. Uses constant bandwidth below 
+    300-400 Hz (Bark scale approximation) and octave spacing above.
+    
+    Args:
+        f: Frequency vector (Hz) as torch tensor
+        resp: Response (complex or real) as torch tensor
+        bpo: Bands per octave (e.g., 1 for 1-octave, 3 for 1/3-octave, 6 for 1/6-octave)
+        freq_range: Frequency range [fmin, fmax]. If None, uses full range
+        b_smooth: Apply smoothing to output (recommended for noisy responses)
+    
+    Returns:
+        resp_averaged: Averaged octave response (complex or real, depending on input)
+        cf: Center frequencies (Hz)
+    """
+    device = f.device
+    dtype = resp.dtype
+    
+    # Apply frequency range filter
+    if freq_range is not None:
+        mask = (f >= freq_range[0]) & (f <= freq_range[1])
+        f = f[mask]
+        resp = resp[mask]
+    
+    # If range is empty
+    if len(f) == 0:
+        return torch.tensor([], device=device, dtype=dtype), torch.tensor([], device=device)
+    
+    # Compute center frequencies (cf) and band-edge frequencies (bef)
+    G = 10 ** (3/10)  # ~2.0 (octave ratio)
+    ref_freq = f[0].item()+1e-6
+    f_min_val = f[0].item()
+    f_max_val = f[-1].item()
+    lgbg = bpo / np.log(G)
+    
+    # Use a constant bandwidth below 400 Hz (based on Zwicker's Bark scale resolution)
+    octave_cutoff = 300  # Hz, set between 120 and 400
+    f_min = int(np.round(lgbg * np.log(octave_cutoff / ref_freq)))
+    f_max = int(np.floor(lgbg * np.log(f_max_val / ref_freq)))
+    
+    # Octave-spaced center frequencies above cutoff
+    cf = ref_freq * (G ** (np.arange(f_min, f_max + 1) / bpo))
+    cf = torch.tensor(cf, device=device, dtype=torch.float32)
+    
+    # Constant bandwidth section below cutoff
+    last_cst_cf = ref_freq * (G ** (f_min / bpo))
+    lf_bw = ref_freq * (G ** (f_min / bpo) - G ** ((f_min - 1) / bpo))
+    nb_cst = 1 + int(np.ceil((last_cst_cf - f_min_val) / lf_bw))
+    
+    if nb_cst > 1:
+        lf_cf = torch.linspace(f_min_val, last_cst_cf, nb_cst, device=device)
+        cf = torch.cat([lf_cf[:-1], cf])
+    
+    # Band-edge frequencies
+    bef = torch.cat([cf[:-1] * (G ** (1 / (2 * bpo))), torch.tensor([f_max_val], device=device)])
+    
+    resp_averaged = torch.full((len(cf),), torch.nan, device=device, dtype=dtype)
+    
+    # Average each octave band
+    f_beg = 0
+    for ii in range(len(cf)):
+        f_end_indices = torch.where(f <= bef[ii])[0]
+        if len(f_end_indices) > 0:
+            f_end = f_end_indices[-1] + 1
+            resp_averaged[ii] = torch.nanmean(resp[f_beg:f_end])
+            f_beg = f_end
+    
+    # Remove empty bins
+    idx = ~torch.isnan(resp_averaged)
+    resp_averaged = resp_averaged[idx]
+    cf = cf[idx]
+    
+    # Apply smoothing if requested
+    if b_smooth and len(resp_averaged) > 4:
+        # First smoothing pass (3-point average)
+        resp_averaged[1:-1] = (1*resp_averaged[1:-1] + resp_averaged[:-2] + resp_averaged[2:]) / 3
+        # Second smoothing pass (5-point average)
+        resp_averaged[2:-2] = (2*resp_averaged[2:-2] + resp_averaged[:-4] + resp_averaged[4:]) / 4
+    
+    return resp_averaged, cf
 
 
 
