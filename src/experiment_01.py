@@ -92,7 +92,7 @@ if __name__ == "__main__":
         controller=EQController_dasp,
         logger=logger,
         window=4410*2,
-        hop=2205*2,
+        hop=2205,
         win_hop_units="samples",)
     
     # For comparison purposes, also simulate withoput compensation EQ
@@ -106,7 +106,7 @@ if __name__ == "__main__":
         controller=None,
         logger=logger,
         window=4410*2,
-        hop=2205*2,
+        hop=2205,
         win_hop_units="samples",)
 
     #%% PLOTS
