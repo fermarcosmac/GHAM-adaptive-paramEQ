@@ -148,12 +148,12 @@ class EQController_dasp:
             
             # Apply octave averaging to smooth and reduce dimensionality (keeps phase!)
             # Smoothing applies to full frequency range [0, fs/2]
-            H_complex_smoothed, freqs_smoothed = octave_average_torch(
-                freqs, H_complex, bpo=bpo, freq_range=None, b_smooth=True
-            )
+            #H_complex_smoothed, freqs_smoothed = octave_average_torch(
+            #    freqs, H_complex, bpo=bpo, freq_range=None, b_smooth=True
+            #)
             
             # Store as (1, 1, estLEM_len_samples) - time-domain impulse response of estimated LEM
-            estLEM_time = torch.fft.irfft(H_complex_smoothed)
+            estLEM_time = torch.fft.irfft(H_complex)
             self.state["current_estLEM"] = estLEM_time.unsqueeze(0).unsqueeze(0).detach()
             self.state["last_LEM_update_sample"] = frame_start_sample
 

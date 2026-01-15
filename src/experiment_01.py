@@ -42,7 +42,7 @@ if __name__ == "__main__":
 
     # Set experiment parameters
     n_rirs = 6  # number of RIRs to use
-    switch_times_norm = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]  # times to switch RIRs (normalized)
+    switch_times_norm = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6]  # times to switch RIRs (normalized)
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
@@ -91,8 +91,8 @@ if __name__ == "__main__":
         EQ=EQ,
         controller=EQController_dasp,
         logger=logger,
-        window=4410*2,
-        hop=2205,
+        window=4410//4,
+        hop=2205//4,
         win_hop_units="samples",)
     
     # For comparison purposes, also simulate withoput compensation EQ
@@ -105,8 +105,8 @@ if __name__ == "__main__":
         EQ=None,
         controller=None,
         logger=logger,
-        window=4410*2,
-        hop=2205,
+        window=4410//4,
+        hop=2205//4,
         win_hop_units="samples",)
 
     #%% PLOTS
