@@ -198,6 +198,11 @@ def simulate_time_varying_process(
     if any(switch_times_s[i] > switch_times_s[i + 1] for i in range(len(switch_times_s) - 1)):
         raise ValueError("switch_times_s must be sorted ascending")
     
+    # Check that, if a controller has been provided, controller.EQ and EQ are references to the same instance
+    if controller is not None and EQ is not None:
+        if controller.EQ is not EQ:
+            raise ValueError("The EQ instance provided to simulate_time_varying_process() must be the same as controller.EQ")
+    
     # Default processing function: EQ + LEM + controller update
     if process_fn is None:
         def default_process(frame: torch.Tensor, sr_: int, rir_: torch.Tensor, frame_start: int, frame_idx: int, EQ: ParametricEQ, controller: EQController_dasp) -> torch.Tensor:

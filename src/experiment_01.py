@@ -21,11 +21,14 @@ from utils import (
 
 
 # Define configuration for EQController_dasp here for now (better to pass it from file)
+# TODO delete unnecessary fields
 EQController_config = {
     "method": "TD-FxLMS",           # adaptation method
     "estLEM_desired_length": 4096,  # memory length for LEM estimate
     "estLEM_sustain_ms": 1000,       # [ms] time to sustain previous LEM estimate
     "estLEM_ridge_lambda": 10.0,    # Ridge L2 regularization parameter for LEM estimation
+    "n_iter_opt": 5,                 # number of optimization iterations for EQ parameter update
+    # TODO: check theory, I THINK I CAN ONLY DO ONE STEP PER FRAME!
 }
 
 
@@ -41,8 +44,8 @@ if __name__ == "__main__":
     rir_dir = base / "data" / "rir"
 
     # Set experiment parameters
-    n_rirs = 6  # number of RIRs to use
-    switch_times_norm = [0.0, 0.2, 0.3, 0.4, 0.5, 0.6]  # times to switch RIRs (normalized)
+    n_rirs = 8  # number of RIRs to use
+    switch_times_norm = [t/(n_rirs-1)*0.6 for t in range(0,n_rirs)] # times to switch RIRs (normalized)
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
@@ -88,11 +91,11 @@ if __name__ == "__main__":
         rirs=rirs,
         rir_indices=rir_indices,
         switch_times_s=switch_times_s,
-        EQ=EQ,
+        EQ=EQ,                              # It is very important that this EQ instance is the same as in the controller
         controller=EQController_dasp,
         logger=logger,
-        window=4410//4,
-        hop=2205//4,
+        window=4410//2,
+        hop=2205//2,
         win_hop_units="samples",)
     
     # For comparison purposes, also simulate withoput compensation EQ
@@ -105,8 +108,8 @@ if __name__ == "__main__":
         EQ=None,
         controller=None,
         logger=logger,
-        window=4410//4,
-        hop=2205//4,
+        window=4410//2,
+        hop=2205//2,
         win_hop_units="samples",)
 
     #%% PLOTS

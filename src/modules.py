@@ -58,6 +58,8 @@ class EQController_dasp:
         # Match length of EQed_frame to out_frame if needed (only for loss evaluation)
         min_len = min(filtered_x.shape[-1], out_frame.shape[-1])
 
+        
+
         # Compute Time-Domain loss
         loss = torch.nn.functional.mse_loss(filtered_x[..., :min_len], out_frame[..., :min_len])
 
