@@ -9,10 +9,11 @@ import matplotlib.pyplot as plt
 
 #TODO
 class EQController_dasp:
-    def __init__(self, EQ, init_params_tensor, config: dict = None, logger=None, roi=None):
+    def __init__(self, EQ, init_params_tensor, est_LEM_delay: int = 0, config: dict = None, logger=None, roi=None):
         self.EQ = EQ                                                            # ParametricEQ object (dasp_pytorch)
         self.params = torch.nn.Parameter(init_params_tensor.clone().detach().requires_grad_(True))  # (1 x n_params) torch Parameter
         self.prev_params: torch.Tensor = torch.zeros_like(self.params)   # (1 x n_params) torch tensor
+        self.est_LEM_delay = est_LEM_delay                                      # estimated delay of LEM system (samples)
         self.config: dict = config if config is not None else {}               # configuration dictionary
         self.logger = logger                                                    # logger object
         self.roi = roi                                                          # region of interest (Hz) for LEM estimation
@@ -56,12 +57,19 @@ class EQController_dasp:
             filtered_x = in_frame  # keep frame as is (1, 1, N)
 
         # Match length of EQed_frame to out_frame if needed (only for loss evaluation)
-        min_len = min(filtered_x.shape[-1], out_frame.shape[-1])
+        #min_len = min(filtered_x.shape[-1], out_frame.shape[-1])
 
+        # Delay in_frame to build desired output frame
+        desired_out_frame = torch.zeros_like(in_frame)
+        in_len = in_frame.shape[-1]
+        if self.est_LEM_delay > 0 and in_len - self.est_LEM_delay > 0:
+            desired_out_frame[..., self.est_LEM_delay:in_len] =  in_frame[..., :in_len - self.est_LEM_delay]
         
+        # Match length of EQed_frame to out_frame if needed (only for loss evaluation)
+        min_len = min(desired_out_frame.shape[-1], out_frame.shape[-1])
 
         # Compute Time-Domain loss
-        loss = torch.nn.functional.mse_loss(filtered_x[..., :min_len], out_frame[..., :min_len])
+        loss = torch.nn.functional.mse_loss(desired_out_frame[..., :min_len], out_frame[..., :min_len])
 
         if self.logger is not None:
             # Log current loss value

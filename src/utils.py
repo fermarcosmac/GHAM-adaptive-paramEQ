@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import List, Callable, Tuple, Optional
 import numpy as np
 import soundfile as sf
-from scipy.signal import fftconvolve, resample_poly
+from scipy.signal import fftconvolve, resample_poly, correlate, correlation_lags
 from scipy.optimize import least_squares
 import bisect
 import warnings
@@ -77,6 +77,10 @@ def load_rirs(rir_dir: Path, max_n: int = None) -> Tuple[List[np.ndarray], List[
         if data.ndim > 1:
             data = data.mean(axis=1)
         data = data.astype(np.float32)
+        # Normalize so that maximum absolute value is one
+        peak = np.max(np.abs(data))
+        if peak > 0:
+            data = data / peak
         rirs.append(data)
         srs.append(sr)
     return rirs, srs
@@ -214,7 +218,7 @@ def simulate_time_varying_process(
                 EQed_frame = frame
             
             # Pass audio through LEM system (represented by RIR)
-            mic_signal = torchaudio.functional.fftconvolve(EQed_frame, rir_)
+            mic_signal = torchaudio.functional.fftconvolve(EQed_frame, rir_, mode="full")  # (1, 1, N + RIR_len - 1)
             # RIR is unknown! Here pytorch cheats by storing for gradient computation the real RIR!
 
             # Update controller with LEM estimation and parameter adaptation
@@ -412,25 +416,52 @@ def rms(x: np.ndarray) -> float:
 
 
 
-def get_delay_from_ir(rir: np.ndarray, sr: int, threshold_db: float = -40.0) -> int:
-    """Estimate delay (in samples) from an RIR by finding the first significant peak.
+def get_delay_from_ir(rir: np.ndarray, sr: int) -> int:
+    """Estimate delay (in samples) from an RIR by finding the position of the first maximum.
+
+    Finds the sample index where the first maximum (peak) of the RIR occurs.
+    This is a robust estimate of the direct sound arrival time.
 
     Args:
         rir: 1-D numpy array containing the RIR
         sr: sample rate (Hz)
-        threshold_db: threshold in dB below the max to consider as significant
+    Returns:
+        delay_samples: estimated delay in samples (int) - index of the maximum value
+    """
+    rir_abs = np.abs(rir)
+    # Find the index of the maximum absolute value
+    delay_samples = np.argmax(rir_abs)
+    return delay_samples
+
+
+
+
+
+def get_delay_xcorr(input_signal: np.ndarray, output_signal: np.ndarray, sr: int, max_delay_s: float = None) -> int:
+    """Estimate delay (in samples) between input and output signals using cross-correlation.
+
+    Searches the entire cross-correlation to find the global maximum, without limiting 
+    the search to a maximum delay window.
+
+    Args:
+        input_signal: 1-D numpy array containing the input signal
+        output_signal: 1-D numpy array containing the output signal
+        sr: sample rate (Hz)
+        max_delay_s: deprecated parameter, ignored (kept for backwards compatibility)
     Returns:
         delay_samples: estimated delay in samples (int)
     """
-    rir_abs = np.abs(rir)
-    max_val = np.max(rir_abs)
-    threshold = max_val * (10 ** (threshold_db / 20.0))
-    above_thresh_indices = np.where(rir_abs >= threshold)[0]
-    if len(above_thresh_indices) == 0:
-        return 0
-    delay_samples = above_thresh_indices[0]
-    return delay_samples
+    # Compute cross-correlation
+    corr = correlate(output_signal, input_signal, mode='full', method='fft')
+    lags = correlation_lags(len(output_signal), len(input_signal), mode='full')
+    mid = np.where(lags == 0)[0][0]
+    #mid = len(corr) // 2
 
+    # Find global maximum in entire cross-correlation
+    delay_index = np.argmax(np.abs(corr))
+    delay_samples = delay_index - mid
+
+    return delay_samples
 
 
 

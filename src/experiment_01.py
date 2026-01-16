@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import torch
+import torchaudio
 import numpy as np
 import matplotlib.pyplot as plt
 # Ensure the workspace root is first on sys.path so the local package is imported
@@ -17,7 +18,7 @@ from utils import (
     simulate_time_varying_process,
     rms,
     save_audio,
-    get_delay_from_ir,
+    get_delay_xcorr,
 )
 
 
@@ -58,12 +59,23 @@ if __name__ == "__main__":
     # Parametric EQ estimation for virtual room compensation and delay estimation
     rir_init = rirs[0]
     EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=6)
-    est_delay = get_delay_from_ir(rir_init, sr)
 
     # Prepare differentiable EQ module with initial compensation parameters
     EQ = ParametricEQ(sample_rate=sr)
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
+
+    # Estimate delay introduced by the EQ + rir_init system
+    # Use the input-output crosscorrelation using noise input
+    noise_input = torch.randn(1,1,sr*2)  # 5 seconds of white noise
+    with torch.no_grad():
+        EQed_noise = EQ.process_normalized(noise_input, init_params_tensor)
+        #EQed_noise = EQed_noise[:,:,:noise_input.shape[-1]]
+        rir_init_t = torch.as_tensor(rir_init, dtype=torch.float32)
+        noise_output = torchaudio.functional.fftconvolve(EQed_noise.squeeze(), rir_init_t, mode="full").squeeze().cpu().numpy()
+    est_delay = get_delay_xcorr(noise_input.squeeze().cpu().numpy(), noise_output, sr)
+
+    # TODO: I think I'm going to need an adative delay estimation during the process...
 
     # Transform audio and RIRs to Torch tensors on appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -77,6 +89,7 @@ if __name__ == "__main__":
     EQController_dasp = EQController_dasp(
         EQ = EQ,
         init_params_tensor = init_params_tensor,
+        est_LEM_delay = est_delay,
         config = EQController_config,
         logger = logger,
         roi = ROI,
