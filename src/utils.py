@@ -273,6 +273,7 @@ def simulate_time_varying_process(
 
         # Apply Hann window to frame for proper overlap-add reconstruction
         windowed_frame = frame * hann_window.unsqueeze(0).unsqueeze(0)
+        windowed_frame = frame # Rectangular window TODO check if it is better
 
         # choose active RIR based on midpoint of the frame in seconds
         midpoint_s = (s + win_len // 2) / float(sr)
@@ -428,9 +429,8 @@ def get_delay_from_ir(rir: np.ndarray, sr: int) -> int:
     Returns:
         delay_samples: estimated delay in samples (int) - index of the maximum value
     """
-    rir_abs = np.abs(rir)
     # Find the index of the maximum absolute value
-    delay_samples = np.argmax(rir_abs)
+    delay_samples = np.argmax(np.abs(rir))
     return delay_samples
 
 

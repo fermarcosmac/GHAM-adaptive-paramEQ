@@ -18,6 +18,7 @@ from utils import (
     simulate_time_varying_process,
     rms,
     save_audio,
+    get_delay_from_ir,
     get_delay_xcorr,
 )
 
@@ -46,9 +47,9 @@ if __name__ == "__main__":
     rir_dir = base / "data" / "rir"
 
     # Set experiment parameters
-    n_rirs = 2  # number of RIRs to use
-    switch_times_norm = [t/(n_rirs-1)*0.6 for t in range(0,n_rirs)] # times to switch RIRs (normalized)
-    switch_times_norm = [0.0, 0.2]  # NORMALIZED RANGE
+    n_rirs = 1  # number of RIRs to use
+    #switch_times_norm = [t/(n_rirs-1)*0.6 for t in range(0,n_rirs)] # times to switch RIRs (normalized)
+    switch_times_norm = [1.0]  # NORMALIZED RANGE
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
@@ -65,17 +66,18 @@ if __name__ == "__main__":
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
 
-    # Estimate delay introduced by the EQ + rir_init system
+
+    # Estimate delay in LEM path from RIR
+    est_LEM_delay = get_delay_from_ir(rir_init, sr)
+
+    # Estimate delay introduced by the EQ compensation
     # Use the input-output crosscorrelation using noise input
     noise_input = torch.randn(1,1,sr*2)  # 5 seconds of white noise
     with torch.no_grad():
         EQed_noise = EQ.process_normalized(noise_input, init_params_tensor)
-        #EQed_noise = EQed_noise[:,:,:noise_input.shape[-1]]
-        rir_init_t = torch.as_tensor(rir_init, dtype=torch.float32)
-        noise_output = torchaudio.functional.fftconvolve(EQed_noise.squeeze(), rir_init_t, mode="full").squeeze().cpu().numpy()
-    est_delay = get_delay_xcorr(noise_input.squeeze().cpu().numpy(), noise_output, sr)
+    est_EQ_delay = get_delay_xcorr(noise_input.squeeze().cpu().numpy(), EQed_noise.squeeze().cpu().numpy(), sr)
 
-    # TODO: I think I'm going to need an adative delay estimation during the process...
+    # TODO: I think I'm going to need an adative delay estimation during the process... I'm not sure, estimations seem too volatile
 
     # Transform audio and RIRs to Torch tensors on appropriate device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -89,7 +91,8 @@ if __name__ == "__main__":
     EQController_dasp = EQController_dasp(
         EQ = EQ,
         init_params_tensor = init_params_tensor,
-        est_LEM_delay = est_delay,
+        est_LEM_delay = est_LEM_delay,
+        est_EQ_delay = est_EQ_delay,
         config = EQController_config,
         logger = logger,
         roi = ROI,
@@ -110,8 +113,8 @@ if __name__ == "__main__":
         EQ=EQ,                              # It is very important that this EQ instance is the same as in the controller
         controller=EQController_dasp,
         logger=logger,
-        window=4410//2,
-        hop=2205//2,
+        window=4410,
+        hop=2205,
         win_hop_units="samples",)
     
     # For comparison purposes, also simulate withoput compensation EQ
@@ -124,8 +127,8 @@ if __name__ == "__main__":
         EQ=None,
         controller=None,
         logger=logger,
-        window=4410//2,
-        hop=2205//2,
+        window=4410,
+        hop=2205,
         win_hop_units="samples",)
 
     #%% PLOTS
@@ -162,14 +165,52 @@ if __name__ == "__main__":
     if len(logger.frames_start_samples) > 0:
         loss_time_axis = np.array(logger.frames_start_samples) / sr  # Convert frame start samples to time
         plt.figure(figsize=(12, 4))
-        plt.plot(loss_time_axis, logger.loss_by_frames, marker='o', markersize=4, linewidth=1, label="MSE Loss")
+        plt.semilogy(loss_time_axis, logger.loss_by_frames, marker='', markersize=4, linewidth=1, label="MSE Loss")
         for i, xt in enumerate(switch_times_s):
             plt.axvline(x=xt, color='r', linestyle='--', alpha=0.7, label="RIR Switch" if i==0 else None)
+        plt.ylim([1e-3, 1e1])
         plt.title("Adaptation Loss Over Time (TD-FxLMS)")
         plt.xlabel("Time (s)")
         plt.ylabel("MSE Loss")
         plt.legend()
         plt.grid(True, alpha=0.3)
+
+    # Plot 3: LEM and EQ delay estimates over time
+    if len(logger.LEM_delay_by_frames) > 0:
+        LEM_time_axis = logger.LEM_delay_log[:, 1] / sr
+        LEM_delays = logger.LEM_delay_log[:, 0]
+        EQ_time_axis = logger.EQ_delay_log[:, 1] / sr
+        EQ_delays = logger.EQ_delay_log[:, 0]
+        
+        plt.figure(figsize=(12, 4))
+        plt.plot(LEM_time_axis, LEM_delays, marker='o', markersize=4, linewidth=1, label="LEM Delay", color='tab:blue')
+        plt.plot(EQ_time_axis, EQ_delays, marker='s', markersize=4, linewidth=1, label="EQ Delay", color='tab:orange')
+        for i, xt in enumerate(switch_times_s):
+            plt.axvline(x=xt, color='r', linestyle='--', alpha=0.7, label="RIR Switch" if i==0 else None)
+        plt.title("Estimated Delays Over Time")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Delay (samples)")
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+    # Plot 4: Measured output vs delayed input (delay alignment check)
+    total_delay = est_LEM_delay + est_EQ_delay
+    # Create delayed input signal
+    delayed_input = np.zeros_like(y_1d_norm)
+    if total_delay > 0 and total_delay < len(input_1d_norm):
+        copy_len = min(len(input_1d_norm) - total_delay, len(delayed_input) - total_delay)
+        delayed_input[total_delay:total_delay + copy_len] = input_1d_norm[:copy_len]
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(time_axis, delayed_input, label=f"Input (delayed by {total_delay} samples)", alpha=0.7)
+    plt.plot(time_axis, y_1d_norm, label="Measured Output (With EQ)", alpha=0.7)
+    for i, xt in enumerate(switch_times_s):
+        plt.axvline(x=xt, color='k', linestyle='--', label="RIR Switch" if i==0 else None)
+    plt.title(f"Delay Alignment Check: Input delayed by {total_delay} samples vs Measured Output")
+    plt.xlabel("Time (s)")
+    plt.ylabel("Normalized Amplitude")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
 
     plt.show()
 

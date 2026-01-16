@@ -2,23 +2,26 @@ import sys
 from pathlib import Path
 import torch
 import torchaudio
+import numpy as np
 root = Path(__file__).resolve().parent.parent  # src -> repo root
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
 import matplotlib.pyplot as plt
+# Don't import anything from utils (circular import issues)
 
 #TODO
 class EQController_dasp:
-    def __init__(self, EQ, init_params_tensor, est_LEM_delay: int = 0, config: dict = None, logger=None, roi=None):
+    def __init__(self, EQ, init_params_tensor, est_LEM_delay: int = 0, est_EQ_delay: int = 0, config: dict = None, logger=None, roi=None):
         self.EQ = EQ                                                            # ParametricEQ object (dasp_pytorch)
         self.params = torch.nn.Parameter(init_params_tensor.clone().detach().requires_grad_(True))  # (1 x n_params) torch Parameter
         self.prev_params: torch.Tensor = torch.zeros_like(self.params)   # (1 x n_params) torch tensor
         self.est_LEM_delay = est_LEM_delay                                      # estimated delay of LEM system (samples)
+        self.est_EQ_delay = est_EQ_delay                                        # estimated delay introduced by EQ (samples)
         self.config: dict = config if config is not None else {}               # configuration dictionary
         self.logger = logger                                                    # logger object
         self.roi = roi                                                          # region of interest (Hz) for LEM estimation
         # The optimizer should depend on the chosen method TODO
-        self.optimizer = torch.optim.SGD([self.params], lr=0.001)        # optimizer for parameter updates
+        self.optimizer = torch.optim.SGD([self.params], lr=1e-6)        # optimizer for parameter updates
         self.state: dict = {}                                                   # dictionary to hold any state information
         
         # Initialize state for adaptive methods
@@ -56,14 +59,16 @@ class EQController_dasp:
         else:
             filtered_x = in_frame  # keep frame as is (1, 1, N)
 
-        # Match length of EQed_frame to out_frame if needed (only for loss evaluation)
-        #min_len = min(filtered_x.shape[-1], out_frame.shape[-1])
+        # Reestimate delay introduced by EQ and total DELAY (EQ + LEM)
+        #from utils import get_delay_xcorr
+        #self.est_EQ_delay = get_delay_xcorr(in_frame.squeeze().cpu().detach().numpy(), EQed_frame.squeeze().cpu().detach().numpy(), sr)
+        frame_delay = self.est_LEM_delay + self.est_EQ_delay
 
         # Delay in_frame to build desired output frame
         desired_out_frame = torch.zeros_like(in_frame)
         in_len = in_frame.shape[-1]
-        if self.est_LEM_delay > 0 and in_len - self.est_LEM_delay > 0:
-            desired_out_frame[..., self.est_LEM_delay:in_len] =  in_frame[..., :in_len - self.est_LEM_delay]
+        if frame_delay > 0 and in_len - frame_delay > 0:
+            desired_out_frame[..., frame_delay:in_len] =  in_frame[..., :in_len - frame_delay]
         
         # Match length of EQed_frame to out_frame if needed (only for loss evaluation)
         min_len = min(desired_out_frame.shape[-1], out_frame.shape[-1])
@@ -74,6 +79,7 @@ class EQController_dasp:
         if self.logger is not None:
             # Log current loss value
             self.logger.log_loss(loss.item(), frame_start_sample)
+            self.logger.log_delays(self.est_LEM_delay, self.est_EQ_delay, frame_start_sample)
 
         # Step the pytorch optimizer (updates self.params)
         self.optimizer.zero_grad()
@@ -166,20 +172,71 @@ class EQController_dasp:
             estLEM_time = torch.fft.irfft(H_complex)
             self.state["current_estLEM"] = estLEM_time.unsqueeze(0).unsqueeze(0).detach()
             self.state["last_LEM_update_sample"] = frame_start_sample
+            
+            # Update delay estimate from the estimated LEM impulse response
+            # The peak of the IR indicates the system delay
+            self.est_LEM_delay = int(torch.argmax(torch.abs(estLEM_time)).item())
 
 
 # TODO
 class EQLogger:
+    """Logger for EQ adaptation metrics. Each variable is stored as Nx2 numpy array: [value, frame_start_sample]."""
+    
     def __init__(self): 
-        self.frames_start_samples = []
-        self.loss_by_frames = [] 
-        self.params_by_frames = []
+        # Each array has shape (N, 2): column 0 = value, column 1 = frame_start_sample
+        self.loss_log = np.empty((0, 2), dtype=np.float64)
+        self.LEM_delay_log = np.empty((0, 2), dtype=np.float64)
+        self.EQ_delay_log = np.empty((0, 2), dtype=np.float64)
+        self.params_log = []  # List of (params_array, frame_start_sample) tuples for variable-length params
 
     def log_loss(self, loss: float, frame_start_sample: int):
-        # If frame_start_sample already logged, update corresponding entry
-        if frame_start_sample in self.frames_start_samples:
-            idx = self.frames_start_samples.index(frame_start_sample)
-            self.loss_by_frames[idx] = loss
+        # Check if this frame already exists
+        existing_idx = np.where(self.loss_log[:, 1] == frame_start_sample)[0]
+        if len(existing_idx) > 0:
+            self.loss_log[existing_idx[0], 0] = loss
         else:
-            self.frames_start_samples.append(frame_start_sample)
-            self.loss_by_frames.append(loss)
+            self.loss_log = np.vstack([self.loss_log, [loss, frame_start_sample]])
+
+    def log_delays(self, LEM_delay: int, EQ_delay: int, frame_start_sample: int):
+        # Log LEM delay
+        existing_idx = np.where(self.LEM_delay_log[:, 1] == frame_start_sample)[0]
+        if len(existing_idx) > 0:
+            self.LEM_delay_log[existing_idx[0], 0] = LEM_delay
+        else:
+            self.LEM_delay_log = np.vstack([self.LEM_delay_log, [LEM_delay, frame_start_sample]])
+        
+        # Log EQ delay
+        existing_idx = np.where(self.EQ_delay_log[:, 1] == frame_start_sample)[0]
+        if len(existing_idx) > 0:
+            self.EQ_delay_log[existing_idx[0], 0] = EQ_delay
+        else:
+            self.EQ_delay_log = np.vstack([self.EQ_delay_log, [EQ_delay, frame_start_sample]])
+
+    # Convenience properties for backwards compatibility
+    @property
+    def frames_start_samples(self):
+        """Return sorted unique frame start samples from loss log."""
+        if len(self.loss_log) == 0:
+            return []
+        return self.loss_log[:, 1].astype(int).tolist()
+    
+    @property
+    def loss_by_frames(self):
+        """Return loss values aligned with frames_start_samples."""
+        if len(self.loss_log) == 0:
+            return []
+        return self.loss_log[:, 0].tolist()
+    
+    @property
+    def LEM_delay_by_frames(self):
+        """Return LEM delay values."""
+        if len(self.LEM_delay_log) == 0:
+            return []
+        return self.LEM_delay_log[:, 0].astype(int).tolist()
+    
+    @property
+    def EQ_delay_by_frames(self):
+        """Return EQ delay values."""
+        if len(self.EQ_delay_log) == 0:
+            return []
+        return self.EQ_delay_log[:, 0].astype(int).tolist()
