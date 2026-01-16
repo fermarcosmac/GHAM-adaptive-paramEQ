@@ -215,6 +215,7 @@ def simulate_time_varying_process(
             
             # Pass audio through LEM system (represented by RIR)
             mic_signal = torchaudio.functional.fftconvolve(EQed_frame, rir_)
+            # RIR is unknown! Here pytorch cheats by storing for gradient computation the real RIR!
 
             # Update controller with LEM estimation and parameter adaptation
             if controller is not None:
@@ -407,6 +408,28 @@ def rms(x: np.ndarray) -> float:
     """Compute root-mean-square of a 1-D numpy array."""
     return np.sqrt(np.mean(x**2))
 
+
+
+
+
+def get_delay_from_ir(rir: np.ndarray, sr: int, threshold_db: float = -40.0) -> int:
+    """Estimate delay (in samples) from an RIR by finding the first significant peak.
+
+    Args:
+        rir: 1-D numpy array containing the RIR
+        sr: sample rate (Hz)
+        threshold_db: threshold in dB below the max to consider as significant
+    Returns:
+        delay_samples: estimated delay in samples (int)
+    """
+    rir_abs = np.abs(rir)
+    max_val = np.max(rir_abs)
+    threshold = max_val * (10 ** (threshold_db / 20.0))
+    above_thresh_indices = np.where(rir_abs >= threshold)[0]
+    if len(above_thresh_indices) == 0:
+        return 0
+    delay_samples = above_thresh_indices[0]
+    return delay_samples
 
 
 

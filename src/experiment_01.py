@@ -16,7 +16,8 @@ from utils import (
     ensure_rirs_sample_rate,
     simulate_time_varying_process,
     rms,
-    save_audio
+    save_audio,
+    get_delay_from_ir,
 )
 
 
@@ -44,8 +45,9 @@ if __name__ == "__main__":
     rir_dir = base / "data" / "rir"
 
     # Set experiment parameters
-    n_rirs = 8  # number of RIRs to use
+    n_rirs = 2  # number of RIRs to use
     switch_times_norm = [t/(n_rirs-1)*0.6 for t in range(0,n_rirs)] # times to switch RIRs (normalized)
+    switch_times_norm = [0.0, 0.2]  # NORMALIZED RANGE
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
 
     # Load probe and ground-truth RIR
@@ -53,9 +55,10 @@ if __name__ == "__main__":
     rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
     rirs = ensure_rirs_sample_rate(rirs, rirs_srs, sr)
 
-    # Parametric EQ estimation for virtual room compensation
+    # Parametric EQ estimation for virtual room compensation and delay estimation
     rir_init = rirs[0]
     EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=6)
+    est_delay = get_delay_from_ir(rir_init, sr)
 
     # Prepare differentiable EQ module with initial compensation parameters
     EQ = ParametricEQ(sample_rate=sr)
