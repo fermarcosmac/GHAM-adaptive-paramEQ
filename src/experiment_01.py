@@ -43,7 +43,7 @@ if __name__ == "__main__":
 
     # Set paths
     base = Path(".")
-    audio_path = base / "data" / "audio" / "input" / "onde_day_funk.wav"
+    audio_path = base / "data" / "audio" / "input" / "guitar-riff_short.wav"
     rir_dir = base / "data" / "rir"
 
     # Set experiment parameters
@@ -72,11 +72,11 @@ if __name__ == "__main__":
 
     # Estimate delay introduced by the EQ compensation
     # Use the input-output crosscorrelation using noise input
-    noise_input = torch.randn(1,1,sr*2)  # 5 seconds of white noise
+    noise_input = torch.randn(1,1,sr*2)  # 2 seconds of white noise
     with torch.no_grad():
         EQed_noise = EQ.process_normalized(noise_input, init_params_tensor)
     est_EQ_delay = get_delay_xcorr(noise_input.squeeze().cpu().numpy(), EQed_noise.squeeze().cpu().numpy(), sr)
-
+    est_EQ_delay = est_EQ_delay + 105 # HARD-CODED CORRECTION FOR THE EQ DELAY ESTIMATION BUG
     # TODO: I think I'm going to need an adative delay estimation during the process... I'm not sure, estimations seem too volatile
 
     # Transform audio and RIRs to Torch tensors on appropriate device
@@ -87,6 +87,7 @@ if __name__ == "__main__":
     # Prepare controller and logger for adaptive EQ (to be defined)
     # TODO
     logger = EQLogger()  
+    logger = None
     # EQController_dasp will take EQ module with its initial parameters and implement adaptation logic
     EQController_dasp = EQController_dasp(
         EQ = EQ,
@@ -113,8 +114,8 @@ if __name__ == "__main__":
         EQ=EQ,                              # It is very important that this EQ instance is the same as in the controller
         controller=EQController_dasp,
         logger=logger,
-        window=4410,
-        hop=2205,
+        window=124,
+        hop=1,
         win_hop_units="samples",)
     
     # For comparison purposes, also simulate withoput compensation EQ
@@ -127,8 +128,8 @@ if __name__ == "__main__":
         EQ=None,
         controller=None,
         logger=logger,
-        window=4410,
-        hop=2205,
+        window=124,
+        hop=1,
         win_hop_units="samples",)
 
     #%% PLOTS
@@ -162,7 +163,7 @@ if __name__ == "__main__":
     
     
     # Plot 2: Loss progression by frames
-    if len(logger.frames_start_samples) > 0:
+    if logger is not None and len(logger.frames_start_samples) > 0:
         loss_time_axis = np.array(logger.frames_start_samples) / sr  # Convert frame start samples to time
         plt.figure(figsize=(12, 4))
         plt.semilogy(loss_time_axis, logger.loss_by_frames, marker='', markersize=4, linewidth=1, label="MSE Loss")
@@ -176,7 +177,7 @@ if __name__ == "__main__":
         plt.grid(True, alpha=0.3)
 
     # Plot 3: LEM and EQ delay estimates over time
-    if len(logger.LEM_delay_by_frames) > 0:
+    if logger is not None and len(logger.LEM_delay_by_frames) > 0:
         LEM_time_axis = logger.LEM_delay_log[:, 1] / sr
         LEM_delays = logger.LEM_delay_log[:, 0]
         EQ_time_axis = logger.EQ_delay_log[:, 1] / sr
