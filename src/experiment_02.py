@@ -75,7 +75,7 @@ if __name__ == "__main__":
     
     # Set simulation parameters
     sr = 48000  # Sample rate (will be updated if RIR has different rate)
-    T_seconds = 4.0  # Simulation duration in seconds (used for white noise and identification)
+    T_seconds = 10.0  # Simulation duration in seconds (used for white noise and identification)
     
     # Load RIR for secondary path S(z)
     # The RIR represents the acoustic path from actuator (speaker) to sensor (microphone)
@@ -92,35 +92,25 @@ if __name__ == "__main__":
     Sw = rir[:Sw_max_len].astype(np.float64)  # Secondary path coefficients
     Sw = Sw / np.max(np.abs(Sw))  # Normalize to prevent numerical issues
     
-    # Design a short FIR filter that approximates the RIR frequency response
-    # This is used for the primary path to have similar spectral characteristics but shorter length
-    Pw_len = 2**1  # Short filter length for primary path
+    # === PRIMARY PATH FILTER CONFIGURATION ===
+    # Design a lowpass FIR filter for the primary path P(z)
+    Pw_len = 64  # Filter length for primary path (number of taps)
+    Pw_cutoff = 4000.0  # Cutoff frequency in Hz
     
-    # Compute the frequency response of the RIR
-    n_fft = 2048
-    rir_fft = np.fft.rfft(Sw, n=n_fft)
-    rir_mag = np.abs(rir_fft)
-    freqs_fft = np.fft.rfftfreq(n_fft, d=1.0/sr)
+    # Design lowpass filter using firwin
+    from scipy.signal import firwin
+    normalized_cutoff = Pw_cutoff / (sr / 2)  # Normalize to [0, 1] (Nyquist = 1)
     
-    # Create frequency/amplitude pairs for firls (needs normalized frequencies 0 to 1)
-    # Sample the magnitude response at key points
-    n_bands = 32  # Number of frequency bands to match
-    band_indices = np.linspace(0, len(freqs_fft) - 1, n_bands * 2, dtype=int)
-    freqs_sampled = freqs_fft[band_indices] / (sr / 2)  # Normalize to [0, 1]
-    amps_sampled = rir_mag[band_indices]
-    amps_sampled = amps_sampled / np.max(amps_sampled)  # Normalize amplitudes
-    
-    # Ensure frequencies start at 0 and end at 1
-    freqs_sampled[0] = 0.0
-    freqs_sampled[-1] = 1.0
-    
-    # Design the filter using least-squares FIR (firls)
-    # Special case: if Pw_len <= 1, use a Kronecker delta (impulse)
-    if Pw_len <= 1:
-        Pw_core = np.array([1.0])  # Kronecker delta
+    if normalized_cutoff >= 1.0:
+        # Cutoff at or above Nyquist: use allpass (impulse)
+        Pw_core = np.zeros(Pw_len)
+        Pw_core[0] = 1.0
+        print(f"Warning: Cutoff {Pw_cutoff} Hz >= Nyquist, using allpass")
     else:
-        Pw_core = firls(Pw_len + 1, freqs_sampled, amps_sampled)
+        Pw_core = firwin(Pw_len, normalized_cutoff, window='hamming')
         Pw_core = Pw_core / np.max(np.abs(Pw_core))  # Normalize
+    
+    print(f"Primary path lowpass filter: {Pw_len} taps, cutoff = {Pw_cutoff} Hz")
     
     # Estimate delay from the RIR (position of first peak = direct sound arrival)
     est_delay = get_delay_from_ir(rir, sr)
@@ -500,6 +490,7 @@ if __name__ == "__main__":
     input_norm = input / np.max(np.abs(input)) * 0.9
     y_primary_norm = y_primary / np.max(np.abs(y_primary)) * 0.9
     y_control_norm = y_control / np.max(np.abs(y_control) + 1e-10) * 0.9
+    e_cont_norm = e_cont / np.max(np.abs(e_cont) + 1e-10) * 0.9
     
     # Compute input filtered through true RIR (Sw)
     input_through_Sw = np.convolve(input, Sw, mode='full')[:T]
@@ -510,12 +501,14 @@ if __name__ == "__main__":
     save_audio(output_dir / "input_through_ref_fir.wav", y_primary_norm, sr)
     save_audio(output_dir / "controlled_signal.wav", y_control_norm, sr)
     save_audio(output_dir / "input_through_rir.wav", input_through_Sw_norm, sr)
+    save_audio(output_dir / "noise_residue.wav", e_cont_norm, sr)
     
     print(f"\nAudio files saved to {output_dir}:")
     print(f"  - input_noise.wav: Input noise signal")
     print(f"  - input_through_ref_fir.wav: Input filtered through reference FIR P(z)")
     print(f"  - controlled_signal.wav: Control signal ys(k) from C(z)*S(z)")
     print(f"  - input_through_rir.wav: Input filtered through true RIR S(z)")
+    print(f"  - noise_residue.wav: Noise residue e(k) = yp(k) - ys(k)")
     
     print("\n" + "=" * 60)
     print("Simulation Complete")
