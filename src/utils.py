@@ -409,6 +409,14 @@ def simulate_time_varying_rir(
 
 
 # MATH
+def next_power_of_2(x):
+    return 1 << (x - 1).bit_length()
+
+
+
+
+
+
 def rms(x: np.ndarray) -> float:
     """Compute root-mean-square of a 1-D numpy array."""
     return np.sqrt(np.mean(x**2))
