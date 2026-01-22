@@ -37,8 +37,8 @@ if __name__ == "__main__":
 
     # Simulation configuration
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
-    frame_len = 2048  # Length (samples) of processing buffers
-    hop_len = frame_len // 2  # Stride between frames
+    frame_len = 2048*4  # Length (samples) of processing buffers
+    hop_len = frame_len  # Stride between frames
     mu_cont = 0.001  # Learning rate for controller (normalized later)
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
@@ -117,7 +117,7 @@ if __name__ == "__main__":
     in_buffer = torch.zeros(1,1,frame_len)
     EQ_out_len = next_power_of_2(frame_len + EQ_memory - 1)
     EQ_out_buffer = torch.zeros(1,1,EQ_out_len)
-    LEM_out_len = EQ_out_len + LEM_memory - 1
+    LEM_out_len = frame_len + LEM_memory - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len)
 
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
@@ -132,6 +132,7 @@ if __name__ == "__main__":
         start_idx = k * hop_len
 
         # Update input buffer and apply window
+        window = 1
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
 
         # Process through EQ
@@ -140,12 +141,11 @@ if __name__ == "__main__":
         # Update EQ output buffer (shift left by hop_len and add new samples)
         EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
         EQ_out_buffer += EQ_out
-        #EQ_out_buffer[..., -frame_len:] += in_buffer # DEBUG (don't EQ at all)
-        # TODO: I'm getting artifacts only when using the EQ, check carefully
+        #EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
 
         # Process through LEM
         #LEM_out = F.conv1d(EQ_out_buffer, LEM, padding=LEM_memory-1)
-        LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer, LEM.view(1,1,-1), mode="full")
+        LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
         
         # Update LEM output buffer (shift left by hop_len)
         LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
@@ -155,7 +155,7 @@ if __name__ == "__main__":
         # TODO
 
         # Store output frame (only store hop_len new samples to handle overlap-add)
-        end_idx = min(start_idx + hop_len, T)
+        end_idx = min(start_idx + frame_len, T)
         samples_to_store = end_idx - start_idx
         y_control[:, :, start_idx:end_idx] += LEM_out_buffer[:, :, :samples_to_store]
 
@@ -182,3 +182,5 @@ if __name__ == "__main__":
     print(f"\nAudio files saved to {output_dir}:")
     print(f"  - input.wav: Input signal")
     print(f"  - output_controlled.wav: Output after EQ and LEM")
+
+    #plt.show()
