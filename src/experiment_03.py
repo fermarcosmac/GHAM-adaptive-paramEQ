@@ -32,15 +32,17 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "onde_day_funk.wav" # Either a file or a valid synthesisable signal
+    input_type = "white_noise" # Either a file or a valid synthesisable signal
     max_audio_len_s = 10.0  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
-    frame_len = 2048*4  # Length (samples) of processing buffers
+    frame_len = 1024  # Length (samples) of processing buffers
     hop_len = frame_len  # Stride between frames
     mu_cont = 0.001  # Learning rate for controller (normalized later)
-
+    # Device selection (GPU if available)
+    device = torch.device("cpu" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     # Acoustic path from actuator (speaker) to sensor (microphone)
     rirs, rirs_srs = load_rirs(rir_dir, max_n=1)
     rir = rirs[0]
@@ -56,7 +58,7 @@ if __name__ == "__main__":
 
     # For now, we assume that the LEM is well identified, so we just use the rir as is
     # Initialize the LEM estimate
-    LEM = torch.from_numpy(rir).view(1,1,-1)
+    LEM = torch.from_numpy(rir).view(1,1,-1).to(device)
     LEM_memory = LEM.shape[-1]
 
     # Initialize differentiable EQ
@@ -65,8 +67,8 @@ if __name__ == "__main__":
     # Uncomment lines below to use initial compenation EQ params as initialization
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
-    EQ_params = torch.nn.Parameter(init_params_tensor.clone())
-    EQ_memory = 3 # TODO: hardcoded for now
+    EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
+    EQ_memory = 128 # TODO: hardcoded for now
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
@@ -75,6 +77,7 @@ if __name__ == "__main__":
         torch.manual_seed(123)  # Seed for reproducibility
         input = torch.randn(T)
         print(f"Input signal: White noise ({max_audio_len_s} s, {T} samples)")
+
     else:
         # Load audio file from data/audio/input/
         audio_path = audio_input_dir / input_type
@@ -108,23 +111,25 @@ if __name__ == "__main__":
 
     # Normalize input signal and adapt tensor shape
     input = input / input.abs().max()
-    input = input.view(1,1,-1)
+    input = input.view(1,1,-1).to(device)
 
     # Allocate results buffers
-    y_control = torch.zeros(1,1,T)
+    y_control = torch.zeros(1,1,T, device=device)
 
     # Initialize buffers
-    in_buffer = torch.zeros(1,1,frame_len)
+    in_buffer = torch.zeros(1,1,frame_len, device=device)
     EQ_out_len = next_power_of_2(frame_len + EQ_memory - 1)
-    EQ_out_buffer = torch.zeros(1,1,EQ_out_len)
+    EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
     LEM_out_len = frame_len + LEM_memory - 1
-    LEM_out_buffer = torch.zeros(1,1,LEM_out_len)
+    LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
 
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
-    window = torch.hann_window(frame_len, periodic=True).view(1, 1, -1)
+    window = torch.hann_window(frame_len, periodic=True, device=device).view(1, 1, -1)
 
+    # Set optimization (adaptive filtering)
     mu = mu_cont / frame_len # TODO: check step size normalization carefully!
-
+    optimizer = torch.optim.SGD([EQ_params], lr=mu)  # lr is set to 1.0 because we manually scale the gradient
+    
     # Main loop
     n_frames = (T - frame_len) // hop_len + 1
     for k in tqdm(range(n_frames), desc="Processing", unit="frame"):
@@ -152,7 +157,27 @@ if __name__ == "__main__":
         LEM_out_buffer += LEM_out
 
         # Use LEM output to compute loss and update EQ parameters
-        # TODO
+        # Compare output with delayed input (delay = LEM delay + EQ memory)
+        total_delay = lem_delay + EQ_memory
+        delayed_start_idx = start_idx - total_delay
+        if delayed_start_idx >= 0 and delayed_start_idx + frame_len <= T:
+            # Get delayed input frame as target
+            target = input[:, :, delayed_start_idx:delayed_start_idx + frame_len]
+            loss = F.mse_loss(LEM_out_buffer[:, :, :frame_len], target)
+        else:
+            # Skip loss computation if delayed input is not available yet
+            loss = torch.tensor(0.0, device=device, requires_grad=True)
+
+        # Backpropagate and update EQ parameters
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            EQ_params.clamp_(0.0, 1.0)
+            # Detach buffers to prevent graph accumulation across iterations
+            EQ_out_buffer = EQ_out_buffer.detach()
+            LEM_out_buffer = LEM_out_buffer.detach()
 
         # Store output frame (only store hop_len new samples to handle overlap-add)
         end_idx = min(start_idx + frame_len, T)
