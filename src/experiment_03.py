@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch, torchaudio
 import torch.nn.functional as F
-from torch.func import jacrev
+from torch.func import jacrev, jacfwd
 from scipy.signal import firls, freqz, minimum_phase
 from tqdm import tqdm
 root = Path(__file__).resolve().parent.parent
@@ -436,14 +436,14 @@ if __name__ == "__main__":
 
         # I think jacrev (and jacfwd) forward the function to differentiate each time, so it's inefficient here.
         grad_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
-        hess_fcn = jacrev(grad_fcn, argnums=0, has_aux=False)
-        jac3_fcn = jacrev(hess_fcn, argnums=0, has_aux=False)
-        jac4_fcn = jacrev(jac3_fcn, argnums=0, has_aux=False)
+        hess_fcn = jacfwd(grad_fcn, argnums=0, has_aux=False)
+        jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
+        jac4_fcn = jacfwd(jac3_fcn, argnums=0, has_aux=False)
         grad = grad_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
         hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
         jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
         jac4 = jac4_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        
+
         loss, buffers = process_buffers(EQ_params,
             in_buffer,
             EQ_out_buffer,
