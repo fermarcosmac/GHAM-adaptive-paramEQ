@@ -170,7 +170,7 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
 
 
 
-def process(EQ_params,
+def params_to_loss(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
@@ -178,14 +178,14 @@ def process(EQ_params,
             LEM,
             frame_len,
             hop_len,
-            target_frame):
+            target_frame,
+            loss_fcn):
     # Process through EQ
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
 
     # Update EQ output buffer (shift left by hop_len and add new samples)
     EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     EQ_out_buffer += EQ_out
-    #EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
 
     # Process through LEM
     LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
@@ -195,7 +195,38 @@ def process(EQ_params,
     LEM_out_buffer += LEM_out
     
     # Use LEM output to compute loss and update EQ parameters
-    loss = F.mse_loss(LEM_out_buffer[:, :, :frame_len], target_frame)
+    loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
+
+    return loss
+
+
+
+def process_buffers(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame,
+            loss_fcn):
+    # Process through EQ
+    EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+
+    # Update EQ output buffer (shift left by hop_len and add new samples)
+    EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    EQ_out_buffer += EQ_out
+
+    # Process through LEM
+    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    
+    # Update LEM output buffer (shift left by hop_len)
+    LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    LEM_out_buffer += LEM_out
+
+    # Use LEM output to compute loss and update EQ parameters
+    loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
     buffers = (EQ_out_buffer, LEM_out_buffer)
 
@@ -403,9 +434,17 @@ if __name__ == "__main__":
 
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
 
-        gradient = jacrev(process, argnums=0, has_aux=True)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame)[0]
-
-        loss, buffers = process(EQ_params,
+        # I think jacrev (and jacfwd) forward the function to differentiate each time, so it's inefficient here.
+        grad_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+        hess_fcn = jacrev(grad_fcn, argnums=0, has_aux=False)
+        jac3_fcn = jacrev(hess_fcn, argnums=0, has_aux=False)
+        jac4_fcn = jacrev(jac3_fcn, argnums=0, has_aux=False)
+        grad = grad_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        jac4 = jac4_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        
+        loss, buffers = process_buffers(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
@@ -413,8 +452,8 @@ if __name__ == "__main__":
             LEM,
             frame_len,
             hop_len,
-            target_frame)
-        
+            target_frame,
+            loss_fcn)
         EQ_out_buffer, LEM_out_buffer = buffers
 
         loss_history.append(loss.item())
