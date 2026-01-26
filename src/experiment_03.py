@@ -252,16 +252,16 @@ if __name__ == "__main__":
     frame_len = 1024                        # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
-    optim_type = "SGD"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.001                          # Learning rate for controller (normalized later)
+    optim_type = "GHAM-1"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.01                          # Learning rate for controller (normalized later)
     loss_type = "TD-MSE"                    # "TD-MSE" or "FD-MSE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
 
     # Device selection
-    #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    #device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
@@ -298,7 +298,7 @@ if __name__ == "__main__":
     if input_type == "white_noise":
         # Generate white noise excitation
         T = int(max_audio_len_s * sr)
-        input = torch.randn(T)
+        input = torch.randn(T, device=device)
         print(f"Input signal: White noise ({max_audio_len_s} s, {T} samples)")
 
     else:
@@ -308,6 +308,7 @@ if __name__ == "__main__":
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
         
         input, audio_sr = torchaudio.load(audio_path)
+        input = input.to(device)
         
         # Convert to mono if stereo (average channels)
         if input.shape[0] > 1:
@@ -360,7 +361,7 @@ if __name__ == "__main__":
     # Set optimization (adaptive filtering)
     match optim_type:
         case "SGD":
-            mu = mu_opt / frame_len # TODO: check step size normalization carefully!
+            mu = mu_opt # TODO: check step size normalization carefully!
             optimizer = torch.optim.SGD([EQ_params], lr=mu)
         case "Adam":
             mu = mu_opt / frame_len # TODO: check step size normalization carefully!
@@ -371,6 +372,9 @@ if __name__ == "__main__":
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
         case "LBFGS":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
+        case "GHAM-1":
+            mu = mu_opt # TODO: check step size normalization carefully!
+            optimizer = None # No optimizer object needed yet! TODO
     
     # Build desired response: delay + optional target magnitude response
     total_delay = lem_delay+7  # TODO: add EQ group delay if necessary. Hardcoded for now!
@@ -413,36 +417,17 @@ if __name__ == "__main__":
         # Update input buffer and apply window
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
 
-        ## Process through EQ
-        #EQ_out = EQ.process_normalized(in_buffer, EQ_params)
-#
-        ## Update EQ output buffer (shift left by hop_len and add new samples)
-        #EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
-        #EQ_out_buffer += EQ_out
-        ##EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
-#
-        ## Process through LEM
-        #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-#
-        ## Update LEM output buffer (shift left by hop_len)
-        #LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
-        #LEM_out_buffer += LEM_out
-#
-        ## Use LEM output to compute loss and update EQ parameters
-        #target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
-        #loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
-
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
 
         # I think jacrev (and jacfwd) forward the function to differentiate each time, so it's inefficient here.
-        grad_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
-        hess_fcn = jacfwd(grad_fcn, argnums=0, has_aux=False)
-        jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
-        jac4_fcn = jacfwd(jac3_fcn, argnums=0, has_aux=False)
-        grad = grad_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        jac4 = jac4_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        #grad_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+        #hess_fcn = jacfwd(grad_fcn, argnums=0, has_aux=False)
+        #jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
+        #jac4_fcn = jacfwd(jac3_fcn, argnums=0, has_aux=False)
+        #grad = grad_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        #hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        #jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+        #jac4 = jac4_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
 
         loss, buffers = process_buffers(EQ_params,
             in_buffer,
@@ -461,9 +446,18 @@ if __name__ == "__main__":
         #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
 
         # Backpropagate and update EQ parameters
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        match optim_type:
+            case "GHAM-1":
+                loss.backward()
+                gradient = EQ_params.grad.clone()
+                loss_val = loss.item()
+                with torch.no_grad():
+                    EQ_params -= mu * loss_val / (gradient + 10*mu)
+                EQ_params.grad = None  # clear gradient for next iteration
+            case _:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
         # Compare gradient computed via autograd and torch.func.jacrev
         #print(f"Gradient check (autograd vs. jacrev) - max abs diff: {(EQ_params.grad - gradient).abs().max().item():.6e}")
