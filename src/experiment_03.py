@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from unittest import case
 import numpy as np
 import matplotlib.pyplot as plt
 import torch, torchaudio
@@ -171,49 +172,57 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
 
 if __name__ == "__main__":
 
+    torch.manual_seed(126)  # Seed for reproducibility
+
     # Set paths
     base = Path(".")
     rir_dir = base / "data" / "rir"
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "white_noise" # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0  # None = full length
+    input_type = "white_noise"      # Either a file or a valid synthesisable signal
+    max_audio_len_s = 10.0          # None = full length
 
     # Simulation configuration
-    ROI = [100.0, 14000.0]  # region of interest for EQ compensation (Hz)
-    frame_len = 1024  # Length (samples) of processing buffers
-    hop_len = frame_len  # Stride between frames
-    mu_cont = 0.001  # Learning rate for controller (normalized later)
-    desired_response_type = "delay_and_mag"  # "delay_and_mag" or "delay_only"
+    ROI = [100.0, 14000.0]          # region of interest for EQ compensation (Hz)
+    frame_len = 1024                # Length (samples) of processing buffers
+    hop_len = frame_len             # Stride between frames
+    window_type = "hann"            # "hann" or None
+    optim_type = "SGD"
+    mu_opt = 0.001                  # Learning rate for controller (normalized later)
+    desired_response_type =...
+    "delay_and_mag"                 # "delay_and_mag" or "delay_only"
+    scenario_type = "constant"      # "constant", "sudden" or "smooth" (not implemented yet)
+    n_rirs = 1                      # Number of RIRs to simulate (for time-varying scenarios)
 
-    # Device selection (GPU if available)
+    # Device selection
     #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
-    rirs, rirs_srs = load_rirs(rir_dir, max_n=1)
-    rir = rirs[0]
-    sr = rirs_srs[0]
+    rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
+    match scenario_type:
+        case "constant":
+            rir = rirs[0]
+            sr = rirs_srs[0]
+        case _:
+            raise NotImplementedError(f"Scenario type '{scenario_type}' not implemented yet.")
 
-    # Desired response computation: delay and magnitude response
+    # Desired response computation and initial EQ parameters
     lem_delay = get_delay_from_ir(rir, sr)
     EQ_comp_dict = get_compensation_EQ_params(rir, sr, ROI, num_sections=6)
     target_mag_resp = EQ_comp_dict["target_response_db"]
     target_mag_freqs = EQ_comp_dict["freq_axis_smoothed"]
     # TODO: interpolate to actual FFT bin used later (frame_len)
 
-
-    # For now, we assume that the LEM is well identified, so we just use the rir as is
-    # Initialize the LEM estimate
+    # Initialize the LEM estimate (assume LEM is well-identified)
     LEM = torch.from_numpy(rir).view(1,1,-1).to(device)
     LEM_memory = LEM.shape[-1]
 
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
-    torch.manual_seed(126)  # Seed for reproducibility
-    init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: It's pretty sensitive to initial parameters
+    #init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: It's pretty sensitive to initial parameters
     #init_params_tensor = torch.zeros(1,EQ.num_params) # random initialization
     # Uncomment lines below to use initial compenation EQ params as initialization
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
@@ -274,14 +283,26 @@ if __name__ == "__main__":
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
 
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
-    window = torch.hann_window(frame_len, periodic=True, device=device).view(1, 1, -1)
+    match window_type:
+        case "hann":
+            window = torch.hann_window(frame_len, periodic=True, device=device).view(1, 1, -1)
+        case _:
+            window = torch.ones(1, 1, frame_len, device=device)
 
     # Set optimization (adaptive filtering)
-    mu = mu_cont / frame_len # TODO: check step size normalization carefully!
-    optimizer = torch.optim.SGD([EQ_params], lr=mu)  # lr is set to 1.0 because we manually scale the gradient
+    match optim_type:
+        case "SGD":
+            mu = mu_opt / frame_len # TODO: check step size normalization carefully!
+            optimizer = torch.optim.SGD([EQ_params], lr=mu)
+        case "Adam":
+            mu = mu_opt / frame_len # TODO: check step size normalization carefully!
+            optimizer = torch.optim.Adam([EQ_params], lr=mu)
+        case "Muon":
+            mu = mu_opt / frame_len # TODO: check step size normalization carefully!
+            optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
     
     # Build desired response: delay + optional target magnitude response
-    total_delay = lem_delay+7  # TODO: add EQ group delay if necessary
+    total_delay = lem_delay+7  # TODO: add EQ group delay if necessary. Hardcoded for now!
     desired_response = build_desired_response_lin_phase(
         sr=sr,
         response_type=desired_response_type,
@@ -293,20 +314,14 @@ if __name__ == "__main__":
         device=device
     )
     
-    # Convert linear-phase desired response to minimum phase
-    # This preserves magnitude response but minimizes group delay
+    # Convert linear-phase desired response to minimum phase (minimize group delay) and add desired delay
     h_linear_np = desired_response.squeeze().cpu().numpy()
     h_minphase_np = minimum_phase(h_linear_np, method='homomorphic', half=False)
-    
-    # Add delay by prepending zeros to the minimum-phase filter
     delay_zeros = torch.zeros(total_delay, device=device)
     h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
     desired_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
-    print(f"Minimum-phase desired response: {desired_response.shape[-1]} samples (delay={total_delay})")
-    print(f"Converted to minimum phase: {desired_response.shape[-1]} samples")
-    
-    # Precompute desired output by convolving input with desired response
-    # Use "full" mode then trim to match input length
+
+    # Precompute desired output
     desired_output = torchaudio.functional.fftconvolve(input, desired_response, mode="full")
     print(f"Precomputed desired output (type: {desired_response_type})")
     
@@ -320,7 +335,6 @@ if __name__ == "__main__":
         start_idx = k * hop_len
 
         # Update input buffer and apply window
-        window = 1
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
 
         # Process through EQ
@@ -332,7 +346,6 @@ if __name__ == "__main__":
         #EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
 
         # Process through LEM
-        #LEM_out = F.conv1d(EQ_out_buffer, LEM, padding=LEM_memory-1)
         LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
         
         # Update LEM output buffer (shift left by hop_len)
@@ -340,7 +353,6 @@ if __name__ == "__main__":
         LEM_out_buffer += LEM_out
 
         # Use LEM output to compute loss and update EQ parameters
-        # Extract target frame from precomputed desired_output
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
         loss = F.mse_loss(LEM_out_buffer[:, :, :frame_len], target_frame)
         loss_history.append(loss.item())
@@ -354,8 +366,7 @@ if __name__ == "__main__":
 
         with torch.no_grad():
             EQ_params.clamp_(0.0, 1.0)
-            # Detach buffers to prevent graph accumulation across iterations
-            EQ_out_buffer = EQ_out_buffer.detach()
+            EQ_out_buffer = EQ_out_buffer.detach() # prevent graph accumulation across iterations
             LEM_out_buffer = LEM_out_buffer.detach()
 
         # Store output frame (only store hop_len new samples to handle overlap-add)
