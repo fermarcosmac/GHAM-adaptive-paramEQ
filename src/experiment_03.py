@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch, torchaudio
 import torch.nn.functional as F
+from torch.func import jacrev
 from scipy.signal import firls, freqz, minimum_phase
 from tqdm import tqdm
 root = Path(__file__).resolve().parent.parent
@@ -168,11 +169,43 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
     return desired_response
 
 
+
+def process(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame):
+    # Process through EQ
+    EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+
+    # Update EQ output buffer (shift left by hop_len and add new samples)
+    EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    EQ_out_buffer += EQ_out
+    #EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
+
+    # Process through LEM
+    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    
+    # Update LEM output buffer (shift left by hop_len)
+    LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    LEM_out_buffer += LEM_out
+    
+    # Use LEM output to compute loss and update EQ parameters
+    loss = F.mse_loss(LEM_out_buffer[:, :, :frame_len], target_frame)
+
+    buffers = (EQ_out_buffer, LEM_out_buffer)
+
+    return loss, buffers
+
 #%% MAIN SCRIPT
 
 if __name__ == "__main__":
 
-    torch.manual_seed(126)  # Seed for reproducibility
+    torch.manual_seed(123)  # Seed for reproducibility
 
     # Set paths
     base = Path(".")
@@ -180,20 +213,20 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "white_noise"      # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0          # None = full length
+    input_type = "white_noise"              # Either a file or a valid synthesisable signal
+    max_audio_len_s = 10.0                  # None = full length
 
     # Simulation configuration
-    ROI = [100.0, 14000.0]          # region of interest for EQ compensation (Hz)
-    frame_len = 1024                # Length (samples) of processing buffers
-    hop_len = frame_len             # Stride between frames
-    window_type = "hann"            # "hann" or None
-    optim_type = "SGD"
-    mu_opt = 0.001                  # Learning rate for controller (normalized later)
-    desired_response_type =...
-    "delay_and_mag"                 # "delay_and_mag" or "delay_only"
-    scenario_type = "constant"      # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 1                      # Number of RIRs to simulate (for time-varying scenarios)
+    ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
+    frame_len = 1024                        # Length (samples) of processing buffers
+    hop_len = frame_len                     # Stride between frames
+    window_type = None                      # "hann" or None
+    optim_type = "SGD"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.001                          # Learning rate for controller (normalized later)
+    loss_type = "TD-MSE"                    # "TD-MSE" or "FD-MSE"
+    desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
+    scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
+    n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
 
     # Device selection
     #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -285,8 +318,12 @@ if __name__ == "__main__":
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
     match window_type:
         case "hann":
+            cond = frame_len / (2*hop_len) 
+            assert cond.is_integer() and int(cond) > 0, "Invalid hop_length for Hann window. Must have frame_len / (2*hop_len) = integer > 0."
             window = torch.hann_window(frame_len, periodic=True, device=device).view(1, 1, -1)
         case _:
+            cond = frame_len / hop_len
+            assert cond.is_integer() and (cond % 2 == 0 or cond == 1), "Invalid hop_length for rectangular window."
             window = torch.ones(1, 1, frame_len, device=device)
 
     # Set optimization (adaptive filtering)
@@ -298,8 +335,11 @@ if __name__ == "__main__":
             mu = mu_opt / frame_len # TODO: check step size normalization carefully!
             optimizer = torch.optim.Adam([EQ_params], lr=mu)
         case "Muon":
+            raise ValueError("Muon optimizer requires newer PyTorch version.")
             mu = mu_opt / frame_len # TODO: check step size normalization carefully!
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
+        case "LBFGS":
+            raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
     
     # Build desired response: delay + optional target magnitude response
     total_delay = lem_delay+7  # TODO: add EQ group delay if necessary. Hardcoded for now!
@@ -325,7 +365,12 @@ if __name__ == "__main__":
     desired_output = torchaudio.functional.fftconvolve(input, desired_response, mode="full")
     print(f"Precomputed desired output (type: {desired_response_type})")
     
-    # Initialize loss history for logging
+    # Initialize loss & loss history
+    match loss_type:
+        case "TD-MSE":
+            loss_fcn = F.mse_loss
+        case _:
+            raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
     loss_history = []
     
     # Main loop
@@ -337,24 +382,41 @@ if __name__ == "__main__":
         # Update input buffer and apply window
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
 
-        # Process through EQ
-        EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+        ## Process through EQ
+        #EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+#
+        ## Update EQ output buffer (shift left by hop_len and add new samples)
+        #EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+        #EQ_out_buffer += EQ_out
+        ##EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
+#
+        ## Process through LEM
+        #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+#
+        ## Update LEM output buffer (shift left by hop_len)
+        #LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+        #LEM_out_buffer += LEM_out
+#
+        ## Use LEM output to compute loss and update EQ parameters
+        #target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
+        #loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
-        # Update EQ output buffer (shift left by hop_len and add new samples)
-        EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
-        EQ_out_buffer += EQ_out
-        #EQ_out_buffer[..., :frame_len] += in_buffer # DEBUG (don't EQ at all)
-
-        # Process through LEM
-        LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-        
-        # Update LEM output buffer (shift left by hop_len)
-        LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
-        LEM_out_buffer += LEM_out
-
-        # Use LEM output to compute loss and update EQ parameters
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
-        loss = F.mse_loss(LEM_out_buffer[:, :, :frame_len], target_frame)
+
+        gradient = jacrev(process, argnums=0, has_aux=True)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame)[0]
+
+        loss, buffers = process(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame)
+        
+        EQ_out_buffer, LEM_out_buffer = buffers
+
         loss_history.append(loss.item())
 
         #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
@@ -363,6 +425,9 @@ if __name__ == "__main__":
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
+        # Compare gradient computed via autograd and torch.func.jacrev
+        #print(f"Gradient check (autograd vs. jacrev) - max abs diff: {(EQ_params.grad - gradient).abs().max().item():.6e}")
 
         with torch.no_grad():
             EQ_params.clamp_(0.0, 1.0)
