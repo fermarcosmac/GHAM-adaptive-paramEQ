@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch, torchaudio
 import torch.nn.functional as F
+from torch.linalg import lstsq
 from torch.func import jacrev, jacfwd
 from scipy.signal import firls, freqz, minimum_phase
 from tqdm import tqdm
@@ -232,6 +233,24 @@ def process_buffers(EQ_params,
 
     return loss, buffers
 
+
+
+
+
+
+
+def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+    """Compute element-wise squared error between predicted and true signals.
+    
+    Args:
+        y_pred: Predicted signal tensor
+        y_true: True signal tensor
+    Returns:
+        Element-wise squared error tensor
+    """
+    return (y_pred - y_true) ** 2
+
+
 #%% MAIN SCRIPT
 
 if __name__ == "__main__":
@@ -245,16 +264,16 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0                  # None = full length
+    max_audio_len_s = 15.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024                        # Length (samples) of processing buffers
-    hop_len = frame_len                     # Stride between frames
+    frame_len = 1024*4                        # Length (samples) of processing buffers
+    hop_len = frame_len//2                     # Stride between frames
     window_type = None                      # "hann" or None
-    optim_type = "GHAM-1"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 1                          # Learning rate for controller (normalized later)
-    loss_type = "TD-MSE"                    # "TD-MSE" or "FD-MSE"
+    optim_type = "GHAM-1J"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.01                            # Learning rate for controller (normalized later)
+    loss_type = "TD-SE"                     # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
@@ -376,6 +395,10 @@ if __name__ == "__main__":
             mu = mu_opt # TODO: check step size normalization carefully!
             eps_0 = 1e-1 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
+        case "GHAM-1J":
+            mu = mu_opt # TODO: check step size normalization carefully!
+            eps_0 = 1e-1 # Irreducible error floor
+            optimizer = None # No optimizer object needed yet! TODO
     
     # Build desired response: delay + optional target magnitude response
     total_delay = lem_delay+7  # TODO: add EQ group delay if necessary. Hardcoded for now!
@@ -405,6 +428,8 @@ if __name__ == "__main__":
     match loss_type:
         case "TD-MSE":
             loss_fcn = F.mse_loss
+        case "TD-SE":
+            loss_fcn = squared_error
         case _:
             raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
     loss_history = []
@@ -442,7 +467,7 @@ if __name__ == "__main__":
             loss_fcn)
         EQ_out_buffer, LEM_out_buffer = buffers
 
-        loss_history.append(loss.item())
+        loss_history.append(torch.mean(loss).item())
 
         #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
 
@@ -451,9 +476,20 @@ if __name__ == "__main__":
             case "GHAM-1":
                 loss.backward()
                 gradient = EQ_params.grad.clone()
-                loss_val = loss.item()
+                loss_val = loss.detach() - torch.tensor(eps_0, device=device)
                 with torch.no_grad():
-                    EQ_params -= mu * np.abs(loss_val-eps_0) / (gradient + 10*mu)
+                    G = gradient.view(1, -1)   # (1, num_params)
+                    b = loss_val.view(1, 1)    # (1, 1)
+                    solution = lstsq(G, b).solution  # (num_params, 1) - min-norm solution
+                    EQ_params -= mu * solution.view_as(EQ_params)
+                EQ_params.grad = None  # clear gradient for next iteration
+            case "GHAM-1J":
+                jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+                loss_val = loss.detach() - torch.tensor(eps_0, device=device)
+                with torch.no_grad():
+                    b = loss_val.view(-1, 1)
+                    solution = lstsq(jac, b).solution 
+                    EQ_params -= mu * solution.view_as(EQ_params)
                 EQ_params.grad = None  # clear gradient for next iteration
             case _:
                 optimizer.zero_grad()
