@@ -253,7 +253,7 @@ if __name__ == "__main__":
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     optim_type = "GHAM-1"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01                          # Learning rate for controller (normalized later)
+    mu_opt = 1                          # Learning rate for controller (normalized later)
     loss_type = "TD-MSE"                    # "TD-MSE" or "FD-MSE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
@@ -374,6 +374,7 @@ if __name__ == "__main__":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
         case "GHAM-1":
             mu = mu_opt # TODO: check step size normalization carefully!
+            eps_0 = 1e-1 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
     
     # Build desired response: delay + optional target magnitude response
@@ -452,15 +453,13 @@ if __name__ == "__main__":
                 gradient = EQ_params.grad.clone()
                 loss_val = loss.item()
                 with torch.no_grad():
-                    EQ_params -= mu * loss_val / (gradient + 10*mu)
+                    EQ_params -= mu * np.abs(loss_val-eps_0) / (gradient + 10*mu)
                 EQ_params.grad = None  # clear gradient for next iteration
             case _:
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
 
-        # Compare gradient computed via autograd and torch.func.jacrev
-        #print(f"Gradient check (autograd vs. jacrev) - max abs diff: {(EQ_params.grad - gradient).abs().max().item():.6e}")
 
         with torch.no_grad():
             EQ_params.clamp_(0.0, 1.0)
