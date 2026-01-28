@@ -240,3 +240,33 @@ class EQLogger:
         if len(self.EQ_delay_log) == 0:
             return []
         return self.EQ_delay_log[:, 0].astype(int).tolist()
+    
+
+
+
+class Ridge:
+    def __init__(self, alpha = 0, fit_intercept = True,):
+        self.alpha = alpha
+        self.fit_intercept = fit_intercept
+        
+    def fit(self, X: torch.tensor, y: torch.tensor) -> None:
+        X = X.rename(None)
+        y = y.rename(None).view(-1,1)
+        assert X.shape[0] == y.shape[0], "Number of X and y rows don't match"
+        if self.fit_intercept:
+            X = torch.cat([torch.ones(X.shape[0], 1, device=X.device), X], dim = 1)
+        # Solving X*w = y with Normal equations:
+        # X^{T}*X*w = X^{T}*y 
+        lhs = X.T @ X 
+        rhs = X.T @ y
+        if self.alpha == 0:
+            self.w = torch.linalg.lstsq(lhs, rhs).solution
+        else:
+            ridge = self.alpha*torch.eye(lhs.shape[0],device=X.device)
+            self.w = torch.linalg.lstsq(lhs + ridge, rhs).solution
+            
+    def predict(self, X: torch.tensor) -> None:
+        X = X.rename(None)
+        if self.fit_intercept:
+            X = torch.cat([torch.ones(X.shape[0], 1, device=X.device), X], dim = 1)
+        return X @ self.w

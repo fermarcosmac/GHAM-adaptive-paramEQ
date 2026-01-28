@@ -13,6 +13,7 @@ root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
 from lib.local_dasp_pytorch.modules import ParametricEQ
+from modules import Ridge
 from utils import (
     load_audio,
     load_rirs,
@@ -263,16 +264,16 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 15.0                  # None = full length
+    input_type = "onde_day_funk.wav"              # Either a file or a valid synthesisable signal
+    max_audio_len_s = 10.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024*4                        # Length (samples) of processing buffers
-    hop_len = frame_len//2                     # Stride between frames
+    frame_len = 1024                      # Length (samples) of processing buffers
+    hop_len = frame_len                  # Stride between frames
     window_type = None                      # "hann" or None
-    optim_type = "GHAM-1J"                    # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01                            # Learning rate for controller (normalized later)
+    optim_type = "GHAM-1J"                  # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.1                           # Learning rate for controller (normalized later)
     loss_type = "TD-SE"                     # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
@@ -361,7 +362,7 @@ if __name__ == "__main__":
 
     # Initialize buffers
     in_buffer = torch.zeros(1,1,frame_len, device=device)
-    EQ_out_len = next_power_of_2(frame_len + EQ_memory - 1)
+    EQ_out_len = next_power_of_2(2*frame_len - 1) # match dasp_pytorch sosfilt_via_fms implementation
     EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
     LEM_out_len = frame_len + LEM_memory - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
@@ -393,12 +394,13 @@ if __name__ == "__main__":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
         case "GHAM-1":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 1e-1 # Irreducible error floor
+            eps_0 = 0.8e-1 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
         case "GHAM-1J":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 1e-1 # Irreducible error floor
+            eps_0 = 0.8e-1 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
+            ridge_regressor = Ridge(alpha = 1e-3, fit_intercept = False)
     
     # Build desired response: delay + optional target magnitude response
     total_delay = lem_delay+7  # TODO: add EQ group delay if necessary. Hardcoded for now!
@@ -433,6 +435,8 @@ if __name__ == "__main__":
         case _:
             raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
     loss_history = []
+    jac_norm_history = []
+    irreducible_loss_history = []
     
     # Main loop
     n_frames = (T - frame_len) // hop_len + 1
@@ -486,10 +490,18 @@ if __name__ == "__main__":
             case "GHAM-1J":
                 jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
                 loss_val = loss.detach() - torch.tensor(eps_0, device=device)
+                
+                # Log jacobian norm and irreducible loss
+                jac_norm_history.append(torch.norm(jac.detach().cpu()).item())
+                irreducible_loss_history.append(loss_val.mean().item())
+                
                 with torch.no_grad():
                     b = loss_val.view(-1, 1)
-                    solution = lstsq(jac, b).solution 
-                    EQ_params -= mu * solution.view_as(EQ_params)
+                    #solution = lstsq(jac, b).solution
+                    ridge_regressor.fit(jac,b)
+                    solution_ridge = ridge_regressor.w.view_as(EQ_params)
+                    #solution_cpu = lstsq(jac.clone().cpu(), b.clone().cpu(), rcond=None, driver='gelsd').solution
+                    EQ_params -= mu * solution_ridge.view_as(EQ_params)
                 EQ_params.grad = None  # clear gradient for next iteration
             case _:
                 optimizer.zero_grad()
@@ -537,12 +549,22 @@ if __name__ == "__main__":
     print(f"  - desired_output.wav: Target/desired output signal")
 
     # Plot loss progression
-    plt.figure(figsize=(12, 4))
+    plt.figure(figsize=(12, 6))
     time_axis = np.arange(len(loss_history)) * hop_len / sr
-    plt.semilogy(time_axis, loss_history, linewidth=1)
+    plt.semilogy(time_axis, loss_history, linewidth=1, label='Loss')
+    
+    # Plot jacobian norm and irreducible loss if available (GHAM-1J)
+    if jac_norm_history:
+        time_axis_jac = np.arange(len(jac_norm_history)) * hop_len / sr
+        plt.semilogy(time_axis_jac, jac_norm_history, linewidth=1, label='Jacobian Norm')
+    if irreducible_loss_history:
+        time_axis_irr = np.arange(len(irreducible_loss_history)) * hop_len / sr
+        plt.semilogy(time_axis_irr, irreducible_loss_history, linewidth=1, label='Irreducible Loss')
+    
     plt.xlabel("Time (s)")
-    plt.ylabel("MSE Loss")
+    plt.ylabel("Value")
     plt.title("Loss Progression During Adaptation")
+    plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.show()
