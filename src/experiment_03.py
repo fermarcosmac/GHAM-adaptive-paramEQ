@@ -212,7 +212,11 @@ def process_buffers(EQ_params,
             frame_len,
             hop_len,
             target_frame,
-            loss_fcn):
+            desired_response,
+            loss_type,
+            loss_fcn,
+            sr=None,
+            ROI=None):
     # Process through EQ
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
 
@@ -228,15 +232,34 @@ def process_buffers(EQ_params,
     LEM_out_buffer += LEM_out
 
     # Use LEM output to compute loss and update EQ parameters
-    loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
+    match loss_type:
+        case "FD-MSE":
+
+            # # Deconvolve actual response within ROI limits
+            nfft = 2*frame_len
+            freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
+            Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
+            X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
+            eps = 1e-8
+            H = Y / (X + eps)
+            if ROI is not None:
+                roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
+                # Set H_complex to 1 (no amplification) outside ROI
+                H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
+            else:
+                roi_mask = torch.ones_like(H, dtype=torch.bool)
+            
+            H_mag_db = 20*torch.log10(torch.abs(H) + eps)
+            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
+            
+            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
+            
+        case _:
+            loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
     buffers = (EQ_out_buffer, LEM_out_buffer)
 
     return loss, buffers
-
-
-
-
 
 
 
@@ -252,11 +275,13 @@ def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     return (y_pred - y_true) ** 2
 
 
+
+
 #%% MAIN SCRIPT
 
 if __name__ == "__main__":
 
-    torch.manual_seed(123)  # Seed for reproducibility
+    torch.manual_seed(123)                  # Seed for reproducibility
 
     # Set paths
     base = Path(".")
@@ -269,19 +294,18 @@ if __name__ == "__main__":
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024                      # Length (samples) of processing buffers
-    hop_len = frame_len                  # Stride between frames
+    frame_len = 1024                        # Length (samples) of processing buffers
+    hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
-    optim_type = "GHAM-1"                  # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.1                            # Learning rate for controller (normalized later)
-    loss_type = "TD-MSE"                     # "TD-MSE", "FD-MSE", "TD-SE"
+    optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.01                           # Learning rate for controller
+    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    #device = torch.device("cpu")
     print(f"Using device: {device}")
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
@@ -396,15 +420,11 @@ if __name__ == "__main__":
             mu = mu_opt # TODO: check step size normalization carefully!
             eps_0 = 0.8e-1 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
-            ridge_regressor = Ridge(alpha = 1e-3, fit_intercept = False)
-        case "GHAM-1J":
-            mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 0.8e-1 # Irreducible error floor
-            optimizer = None # No optimizer object needed yet! TODO
-            ridge_regressor = Ridge(alpha = 1e-3, fit_intercept = False)
-    
+            alpha_ridge = 1e-3
+            ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
+
     # Build desired response: delay + optional target magnitude response
-    total_delay = lem_delay+7  # TODO: add EQ group delay if necessary. Hardcoded for now!
+    total_delay = lem_delay + 7  # TODO: add EQ group delay if necessary. Hardcoded for now!
     desired_response = build_desired_response_lin_phase(
         sr=sr,
         response_type=desired_response_type,
@@ -430,6 +450,8 @@ if __name__ == "__main__":
     # Initialize loss & loss history
     match loss_type:
         case "TD-MSE":
+            loss_fcn = F.mse_loss
+        case "FD-MSE":
             loss_fcn = F.mse_loss
         case "TD-SE":
             loss_fcn = squared_error
@@ -469,7 +491,11 @@ if __name__ == "__main__":
             frame_len,
             hop_len,
             target_frame,
-            loss_fcn)
+            desired_response,
+            loss_type,
+            loss_fcn,
+            sr=sr,
+            ROI=ROI)
         EQ_out_buffer, LEM_out_buffer = buffers
 
         loss_history.append(torch.mean(loss).item())
@@ -480,7 +506,7 @@ if __name__ == "__main__":
         match optim_type:
             case "GHAM-1":
                 match loss_type:
-                    case "TD-MSE":
+                    case "TD-MSE" | "FD-MSE":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE":
@@ -496,22 +522,6 @@ if __name__ == "__main__":
                     EQ_params -= mu * update.view_as(EQ_params)
                 EQ_params.grad = None
 
-            case "GHAM-1J":
-                jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-                loss_val = loss.detach() - torch.tensor(eps_0, device=device)
-                
-                # Log jacobian norm and irreducible loss
-                jac_norm_history.append(torch.norm(jac.detach().cpu()).item())
-                irreducible_loss_history.append(loss_val.mean().item())
-                
-                with torch.no_grad():
-                    b = loss_val.view(-1, 1)
-                    #solution = lstsq(jac, b).solution
-                    ridge_regressor.fit(jac,b)
-                    solution_ridge = ridge_regressor.w.view_as(EQ_params)
-                    #solution_cpu = lstsq(jac.clone().cpu(), b.clone().cpu(), rcond=None, driver='gelsd').solution
-                    EQ_params -= mu * solution_ridge.view_as(EQ_params)
-                EQ_params.grad = None  # clear gradient for next iteration
             case _:
                 optimizer.zero_grad()
                 loss.backward()
