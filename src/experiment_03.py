@@ -264,7 +264,7 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "onde_day_funk.wav"              # Either a file or a valid synthesisable signal
+    input_type = "white_noise"              # Either a file or a valid synthesisable signal
     max_audio_len_s = 10.0                  # None = full length
 
     # Simulation configuration
@@ -272,9 +272,9 @@ if __name__ == "__main__":
     frame_len = 1024                      # Length (samples) of processing buffers
     hop_len = frame_len                  # Stride between frames
     window_type = None                      # "hann" or None
-    optim_type = "GHAM-1J"                  # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.1                           # Learning rate for controller (normalized later)
-    loss_type = "TD-SE"                     # "TD-MSE", "FD-MSE", "TD-SE"
+    optim_type = "GHAM-1"                  # "SGD", "Adam", "LBFGS"or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.1                            # Learning rate for controller (normalized later)
+    loss_type = "TD-MSE"                     # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
@@ -396,6 +396,7 @@ if __name__ == "__main__":
             mu = mu_opt # TODO: check step size normalization carefully!
             eps_0 = 0.8e-1 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
+            ridge_regressor = Ridge(alpha = 1e-3, fit_intercept = False)
         case "GHAM-1J":
             mu = mu_opt # TODO: check step size normalization carefully!
             eps_0 = 0.8e-1 # Irreducible error floor
@@ -478,15 +479,23 @@ if __name__ == "__main__":
         # Backpropagate and update EQ parameters
         match optim_type:
             case "GHAM-1":
-                loss.backward()
-                gradient = EQ_params.grad.clone()
+                match loss_type:
+                    case "TD-MSE":
+                        loss.backward()
+                        jac = EQ_params.grad.clone().view(1,-1)
+                    case "TD-SE":
+                        jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+                
                 loss_val = loss.detach() - torch.tensor(eps_0, device=device)
+                
                 with torch.no_grad():
-                    G = gradient.view(1, -1)   # (1, num_params)
-                    b = loss_val.view(1, 1)    # (1, 1)
-                    solution = lstsq(G, b).solution  # (num_params, 1) - min-norm solution
-                    EQ_params -= mu * solution.view_as(EQ_params)
-                EQ_params.grad = None  # clear gradient for next iteration
+                    b = loss_val.view(-1,1)                # (loss_dims, 1)
+                    update = lstsq(jac, b).solution       # (num_params, 1)
+                    #ridge_regressor.fit(jac,b)
+                    #update_ridge = ridge_regressor.w      # (num_params, 1)
+                    EQ_params -= mu * update.view_as(EQ_params)
+                EQ_params.grad = None
+
             case "GHAM-1J":
                 jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
                 loss_val = loss.detach() - torch.tensor(eps_0, device=device)
