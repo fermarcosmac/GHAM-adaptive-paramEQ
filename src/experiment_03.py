@@ -93,7 +93,7 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
     
     if response_type == "delay_only":
         # Simple Kronecker delta (no delay - add delay externally if needed)
-        desired_response = torch.zeros(1, 1, 1, device=device)
+        desired_response = torch.zeros(1, 1, fir_len, device=device)
         desired_response[:, :, 0] = 1.0
         print(f"Desired response: delay only (1 sample)")
         
@@ -373,17 +373,18 @@ if __name__ == "__main__":
     max_audio_len_s = 15.0                  # None = full length
 
     # Simulation configuration
-    ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
+    ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
     frame_len = 1024*2                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.1                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01#*1e-3                           # Learning rate for controller
+    mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
+    debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -492,7 +493,7 @@ if __name__ == "__main__":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
         case "GHAM-1":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 0 # Irreducible error floor
+            eps_0 = 20 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
@@ -533,9 +534,6 @@ if __name__ == "__main__":
     jac_norm_history = []
     jac_cond_history = []
     irreducible_loss_history = []
-    
-    # Debug plot state (set to None to disable, or {} to enable)
-    debug_plot_state = {}  # Set to None to disable debug plotting
 
     # Initialize buffers
     in_buffer = torch.zeros(1,1,frame_len, device=device)
@@ -706,6 +704,7 @@ if __name__ == "__main__":
         ax_lin_r.legend(loc='upper right')
     
     plt.tight_layout()
-    plt.show()
+    plt.ioff()  # Turn off interactive mode so plt.show() blocks
+    plt.show()  # This will block until all figures are closed
 
     pass
