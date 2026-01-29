@@ -176,12 +176,18 @@ def params_to_loss(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
+            est_response_buffer,
             EQ,
             LEM,
             frame_len,
             hop_len,
             target_frame,
-            loss_fcn):
+            desired_response,
+            forget_factor,
+            loss_fcn,
+            loss_type,
+            sr=None,
+            ROI=None):
     # Process through EQ
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
 
@@ -214,7 +220,13 @@ def params_to_loss(EQ_params,
             else:
                 roi_mask = torch.ones_like(H, dtype=torch.bool)
             
-            H_mag_db = 20*torch.log10(torch.abs(H) + eps)
+            if torch.sum(torch.abs(est_response_buffer)) == 0:
+                forget_factor = 1.0
+            else:
+                forget_factor = forget_factor
+            H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
+            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
+            est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
             
             loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
@@ -230,12 +242,14 @@ def process_buffers(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
+            est_response_buffer,
             EQ,
             LEM,
             frame_len,
             hop_len,
             target_frame,
             desired_response,
+            forget_factor,
             loss_type,
             loss_fcn,
             sr=None,
@@ -260,7 +274,7 @@ def process_buffers(EQ_params,
         case "FD-MSE" | "FD-SE":
 
             # # Deconvolve actual response within ROI limits
-            nfft = 2*frame_len
+            nfft = 2*frame_len-1
             freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
             Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
             X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
@@ -273,7 +287,13 @@ def process_buffers(EQ_params,
             else:
                 roi_mask = torch.ones_like(H, dtype=torch.bool)
             
-            H_mag_db = 20*torch.log10(torch.abs(H) + eps)
+            if torch.sum(torch.abs(est_response_buffer)) == 0:
+                forget_factor = 1.0
+            else:
+                forget_factor = forget_factor
+            H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
+            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
+            est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
             
             loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
@@ -317,7 +337,7 @@ def process_buffers(EQ_params,
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
-    buffers = (EQ_out_buffer, LEM_out_buffer)
+    buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer)
 
     return loss, buffers
 
@@ -354,12 +374,13 @@ if __name__ == "__main__":
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024*2                        # Length (samples) of processing buffers
+    frame_len = 1024*2                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
+    forget_factor = 0.1                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 0.01#*1e-3                           # Learning rate for controller
-    loss_type = "FD-SE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
@@ -444,14 +465,6 @@ if __name__ == "__main__":
     # Allocate results buffers
     y_control = torch.zeros(1,1,T, device=device)
 
-    # Initialize buffers
-    in_buffer = torch.zeros(1,1,frame_len, device=device)
-    EQ_out_len = next_power_of_2(2*frame_len - 1) # match dasp_pytorch sosfilt_via_fms implementation
-    EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
-    LEM_out_len = frame_len + LEM_memory - 1
-    LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
-    est_response_buffer = torch.zeros(1,1,frame_len, device=device) # TODO stabilize response estimation
-
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
     match window_type:
         case "hann":
@@ -523,6 +536,15 @@ if __name__ == "__main__":
     
     # Debug plot state (set to None to disable, or {} to enable)
     debug_plot_state = {}  # Set to None to disable debug plotting
+
+    # Initialize buffers
+    in_buffer = torch.zeros(1,1,frame_len, device=device)
+    EQ_out_len = next_power_of_2(2*frame_len - 1) # match dasp_pytorch sosfilt_via_fms implementation
+    EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
+    LEM_out_len = frame_len + LEM_memory - 1
+    LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
+    est_response_buffer = torch.zeros(1,1,frame_len, device=device) # TODO stabilize response estimation
+
     
     # Main loop
     n_frames = (T - frame_len) // hop_len + 1
@@ -549,18 +571,20 @@ if __name__ == "__main__":
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
+            est_response_buffer,
             EQ,
             LEM,
             frame_len,
             hop_len,
             target_frame,
             desired_response,
+            forget_factor,
             loss_type,
             loss_fcn,
             sr=sr,
             ROI=ROI,
             debug_plot_state=debug_plot_state)
-        EQ_out_buffer, LEM_out_buffer = buffers
+        EQ_out_buffer, LEM_out_buffer, est_response_buffer = buffers
 
         loss_history.append(torch.mean(loss).item())
 
@@ -574,7 +598,7 @@ if __name__ == "__main__":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
+                        jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr=None,ROI=None).squeeze()
                 
                 loss_val = loss.detach() - torch.tensor(eps_0, device=device)
                 
@@ -600,6 +624,7 @@ if __name__ == "__main__":
             EQ_params.clamp_(0.0, 1.0)
             EQ_out_buffer = EQ_out_buffer.detach() # prevent graph accumulation across iterations
             LEM_out_buffer = LEM_out_buffer.detach()
+            est_response_buffer = est_response_buffer.detach()
 
         # Store output frame (only store hop_len new samples to handle overlap-add)
         end_idx = min(start_idx + frame_len, T)
