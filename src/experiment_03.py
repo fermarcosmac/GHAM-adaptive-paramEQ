@@ -384,7 +384,7 @@ if __name__ == "__main__":
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
-    debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
+    debug_plot_state = {}                   # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
