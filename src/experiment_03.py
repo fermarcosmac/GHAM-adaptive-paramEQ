@@ -290,7 +290,7 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0                  # None = full length
+    max_audio_len_s = 15.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
@@ -298,7 +298,7 @@ if __name__ == "__main__":
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01                           # Learning rate for controller
+    mu_opt = 0.01#*1e-5                           # Learning rate for controller
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
@@ -418,7 +418,7 @@ if __name__ == "__main__":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
         case "GHAM-1":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 0.8e-1 # Irreducible error floor
+            eps_0 = 0 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
@@ -459,6 +459,7 @@ if __name__ == "__main__":
             raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
     loss_history = []
     jac_norm_history = []
+    jac_cond_history = []
     irreducible_loss_history = []
     
     # Main loop
@@ -514,9 +515,13 @@ if __name__ == "__main__":
                 
                 loss_val = loss.detach() - torch.tensor(eps_0, device=device)
                 
+                # Log irreducible loss and jacobian condition number
+                irreducible_loss_history.append(loss_val.mean().item())
+                jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
+                
                 with torch.no_grad():
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
-                    update = lstsq(jac, b).solution       # (num_params, 1)
+                    update = lstsq(jac, b).solution        # (num_params, 1)
                     #ridge_regressor.fit(jac,b)
                     #update_ridge = ridge_regressor.w      # (num_params, 1)
                     EQ_params -= mu * update.view_as(EQ_params)
@@ -567,23 +572,50 @@ if __name__ == "__main__":
     print(f"  - output_controlled.wav: Output after EQ and LEM")
     print(f"  - desired_output.wav: Target/desired output signal")
 
-    # Plot loss progression
-    plt.figure(figsize=(12, 6))
+    # Plot loss progression (2x1 subplot: log scale on top, linear scale on bottom)
+    fig, (ax_log, ax_lin) = plt.subplots(2, 1, figsize=(12, 10), sharex=True)
     time_axis = np.arange(len(loss_history)) * hop_len / sr
-    plt.semilogy(time_axis, loss_history, linewidth=1, label='Loss')
     
-    # Plot jacobian norm and irreducible loss if available (GHAM-1J)
-    if jac_norm_history:
-        time_axis_jac = np.arange(len(jac_norm_history)) * hop_len / sr
-        plt.semilogy(time_axis_jac, jac_norm_history, linewidth=1, label='Jacobian Norm')
+    # ---- Top subplot: Log scale ----
+    # Left axis: Loss and Irreducible Loss
+    ax_log.semilogy(time_axis, loss_history, linewidth=1, label='Loss', color='tab:blue')
     if irreducible_loss_history:
         time_axis_irr = np.arange(len(irreducible_loss_history)) * hop_len / sr
-        plt.semilogy(time_axis_irr, irreducible_loss_history, linewidth=1, label='Irreducible Loss')
+        ax_log.semilogy(time_axis_irr, irreducible_loss_history, linewidth=1, label='Irreducible Loss', color='tab:orange')
+    ax_log.set_ylabel("Loss (log)")
+    ax_log.grid(True, alpha=0.3)
+    ax_log.legend(loc='upper left')
+    ax_log.set_title("Loss Progression During Adaptation (Log Scale)")
     
-    plt.xlabel("Time (s)")
-    plt.ylabel("Value")
-    plt.title("Loss Progression During Adaptation")
-    plt.legend()
-    plt.grid(True, alpha=0.3)
+    # Right axis: Jacobian condition number (log)
+    if jac_cond_history:
+        ax_log_r = ax_log.twinx()
+        time_axis_cond = np.arange(len(jac_cond_history)) * hop_len / sr
+        ax_log_r.semilogy(time_axis_cond, jac_cond_history, linewidth=1, label='Jacobian Cond. Number', color='tab:green')
+        ax_log_r.set_ylabel("Condition Number", color='tab:green')
+        ax_log_r.tick_params(axis='y', labelcolor='tab:green')
+        ax_log_r.legend(loc='upper right')
+    
+    # ---- Bottom subplot: Linear scale ----
+    # Left axis: Loss and Irreducible Loss
+    ax_lin.plot(time_axis, loss_history, linewidth=1, label='Loss', color='tab:blue')
+    if irreducible_loss_history:
+        time_axis_irr = np.arange(len(irreducible_loss_history)) * hop_len / sr
+        ax_lin.plot(time_axis_irr, irreducible_loss_history, linewidth=1, label='Irreducible Loss', color='tab:orange')
+    ax_lin.set_xlabel("Time (s)")
+    ax_lin.set_ylabel("Loss (linear)")
+    ax_lin.grid(True, alpha=0.3)
+    ax_lin.legend(loc='upper left')
+    ax_lin.set_title("Loss Progression During Adaptation (Linear Scale)")
+    
+    # Right axis: Jacobian condition number (linear)
+    if jac_cond_history:
+        ax_lin_r = ax_lin.twinx()
+        time_axis_cond = np.arange(len(jac_cond_history)) * hop_len / sr
+        ax_lin_r.plot(time_axis_cond, jac_cond_history, linewidth=1, label='Jacobian Cond. Number', color='tab:green')
+        ax_lin_r.set_ylabel("Condition Number", color='tab:green')
+        ax_lin_r.tick_params(axis='y', labelcolor='tab:green')
+        ax_lin_r.legend(loc='upper right')
+    
     plt.tight_layout()
     plt.show()
