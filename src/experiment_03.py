@@ -197,43 +197,8 @@ def params_to_loss(EQ_params,
     LEM_out_buffer += LEM_out
     
     # Use LEM output to compute loss and update EQ parameters
-    loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
-
-    return loss
-
-
-
-def process_buffers(EQ_params,
-            in_buffer,
-            EQ_out_buffer,
-            LEM_out_buffer,
-            EQ,
-            LEM,
-            frame_len,
-            hop_len,
-            target_frame,
-            desired_response,
-            loss_type,
-            loss_fcn,
-            sr=None,
-            ROI=None):
-    # Process through EQ
-    EQ_out = EQ.process_normalized(in_buffer, EQ_params)
-
-    # Update EQ output buffer (shift left by hop_len and add new samples)
-    EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
-    EQ_out_buffer += EQ_out
-
-    # Process through LEM
-    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-    
-    # Update LEM output buffer (shift left by hop_len)
-    LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
-    LEM_out_buffer += LEM_out
-
-    # Use LEM output to compute loss and update EQ parameters
     match loss_type:
-        case "FD-MSE":
+        case "FD-MSE" | "FD-SE":
 
             # # Deconvolve actual response within ROI limits
             nfft = 2*frame_len
@@ -253,6 +218,101 @@ def process_buffers(EQ_params,
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
             
             loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
+            
+        case _:
+            loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
+
+    return loss
+
+
+
+def process_buffers(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame,
+            desired_response,
+            loss_type,
+            loss_fcn,
+            sr=None,
+            ROI=None,
+            debug_plot_state=None):
+    # Process through EQ
+    EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+
+    # Update EQ output buffer (shift left by hop_len and add new samples)
+    EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    EQ_out_buffer += EQ_out
+
+    # Process through LEM
+    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    
+    # Update LEM output buffer (shift left by hop_len)
+    LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    LEM_out_buffer += LEM_out
+
+    # Use LEM output to compute loss and update EQ parameters
+    match loss_type:
+        case "FD-MSE" | "FD-SE":
+
+            # # Deconvolve actual response within ROI limits
+            nfft = 2*frame_len
+            freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
+            Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
+            X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
+            eps = 1e-8
+            H = Y / (X + eps)
+            if ROI is not None:
+                roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
+                # Set H_complex to 1 (no amplification) outside ROI
+                H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
+            else:
+                roi_mask = torch.ones_like(H, dtype=torch.bool)
+            
+            H_mag_db = 20*torch.log10(torch.abs(H) + eps)
+            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
+            
+            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
+
+            if debug_plot_state is not None:
+                freqs_roi = freqs[roi_mask].detach().cpu().numpy()
+                H_mag_db_roi = H_mag_db[roi_mask].detach().cpu().numpy()
+                
+                # Smoothed version of actual magnitude response (moving average)
+                smooth_window = 31  # Must be odd
+                H_mag_db_roi_smoothed = np.convolve(H_mag_db_roi, np.ones(smooth_window)/smooth_window, mode='same')
+                
+                # Initialize plot on first call
+                if debug_plot_state.get('fig') is None:
+                    plt.ion()  # Enable interactive mode
+                    fig, ax = plt.subplots(figsize=(12, 6))
+                    line_raw, = ax.plot(freqs_roi, H_mag_db_roi, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
+                    line_smooth, = ax.plot(freqs_roi, H_mag_db_roi_smoothed, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
+                    line_desired, = ax.plot(freqs_roi, desired_mag_db[roi_mask].detach().cpu().numpy(), linewidth=1, label='Desired H(f)', color='tab:orange')
+                    ax.set_xlabel("Frequency (Hz)")
+                    ax.set_ylabel("Magnitude (dB)")
+                    ax.set_xscale('log')
+                    ax.set_title("FD-MSE: Actual vs Desired Magnitude Response")
+                    ax.legend(loc='lower left')
+                    ax.grid(True, alpha=0.3)
+                    ax.set_ylim(-20, 30)  # Fixed y-axis range
+                    plt.tight_layout()
+                    debug_plot_state['fig'] = fig
+                    debug_plot_state['ax'] = ax
+                    debug_plot_state['line_raw'] = line_raw
+                    debug_plot_state['line_smooth'] = line_smooth
+                    debug_plot_state['line_desired'] = line_desired
+                else:
+                    # Update existing lines
+                    debug_plot_state['line_raw'].set_ydata(H_mag_db_roi)
+                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_roi_smoothed)
+                    debug_plot_state['line_desired'].set_ydata(desired_mag_db[roi_mask].detach().cpu().numpy())
+                debug_plot_state['fig'].canvas.draw()
+                debug_plot_state['fig'].canvas.flush_events()
             
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
@@ -294,12 +354,12 @@ if __name__ == "__main__":
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024                        # Length (samples) of processing buffers
+    frame_len = 1024*2                        # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01#*1e-5                           # Learning rate for controller
-    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    mu_opt = 0.01#*1e-3                           # Learning rate for controller
+    loss_type = "FD-SE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
@@ -390,6 +450,7 @@ if __name__ == "__main__":
     EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
     LEM_out_len = frame_len + LEM_memory - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
+    est_response_buffer = torch.zeros(1,1,frame_len, device=device) # TODO stabilize response estimation
 
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
     match window_type:
@@ -449,11 +510,9 @@ if __name__ == "__main__":
     
     # Initialize loss & loss history
     match loss_type:
-        case "TD-MSE":
+        case "TD-MSE" | "FD-MSE":
             loss_fcn = F.mse_loss
-        case "FD-MSE":
-            loss_fcn = F.mse_loss
-        case "TD-SE":
+        case "TD-SE" | "FD-SE":
             loss_fcn = squared_error
         case _:
             raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
@@ -461,6 +520,9 @@ if __name__ == "__main__":
     jac_norm_history = []
     jac_cond_history = []
     irreducible_loss_history = []
+    
+    # Debug plot state (set to None to disable, or {} to enable)
+    debug_plot_state = {}  # Set to None to disable debug plotting
     
     # Main loop
     n_frames = (T - frame_len) // hop_len + 1
@@ -496,7 +558,8 @@ if __name__ == "__main__":
             loss_type,
             loss_fcn,
             sr=sr,
-            ROI=ROI)
+            ROI=ROI,
+            debug_plot_state=debug_plot_state)
         EQ_out_buffer, LEM_out_buffer = buffers
 
         loss_history.append(torch.mean(loss).item())
@@ -510,7 +573,7 @@ if __name__ == "__main__":
                     case "TD-MSE" | "FD-MSE":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
-                    case "TD-SE":
+                    case "TD-SE" | "FD-SE":
                         jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
                 
                 loss_val = loss.detach() - torch.tensor(eps_0, device=device)
@@ -619,3 +682,5 @@ if __name__ == "__main__":
     
     plt.tight_layout()
     plt.show()
+
+    pass
