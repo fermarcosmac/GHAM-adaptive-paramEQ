@@ -361,7 +361,7 @@ def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
 
 if __name__ == "__main__":
 
-    torch.manual_seed(123)                  # Seed for reproducibility
+    torch.manual_seed(124)                  # Seed for reproducibility
 
     # Set paths
     base = Path(".")
@@ -370,21 +370,21 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 15.0                  # None = full length
+    max_audio_len_s = 30.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
     frame_len = 1024*2                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
-    forget_factor = 0.1                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
+    forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    mu_opt = 0.01*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "sudden"              # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 2                              # Number of RIRs to simulate (for time-varying scenarios)
-    debug_plot_state = {}                   # Debug plot state (set to None to disable, or {} to enable)
+    n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
+    debug_plot_state = None                   # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -498,7 +498,7 @@ if __name__ == "__main__":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
         case "GHAM-1":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 20 # Irreducible error floor
+            eps_0 = 20*0.8 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
@@ -699,6 +699,13 @@ if __name__ == "__main__":
         ax_log_r.tick_params(axis='y', labelcolor='tab:green')
         ax_log_r.legend(loc='upper right')
     
+    # Add vertical lines at RIR switch times (for sudden scenario)
+    if scenario_type == "sudden" and 'switch_times_norm' in dir():
+        total_time = T / sr
+        for switch_time_norm in switch_times_norm:
+            switch_time_s = switch_time_norm * total_time
+            ax_log.axvline(x=switch_time_s, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+    
     # ---- Bottom subplot: Linear scale ----
     # Left axis: Loss and Irreducible Loss
     ax_lin.plot(time_axis, loss_history, linewidth=1, label='Loss', color='tab:blue')
@@ -720,7 +727,45 @@ if __name__ == "__main__":
         ax_lin_r.tick_params(axis='y', labelcolor='tab:green')
         ax_lin_r.legend(loc='upper right')
     
+    # Add vertical lines at RIR switch times (for sudden scenario)
+    if scenario_type == "sudden" and 'switch_times_norm' in dir():
+        total_time = T / sr
+        for switch_time_norm in switch_times_norm:
+            switch_time_s = switch_time_norm * total_time
+            ax_lin.axvline(x=switch_time_s, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+    
     plt.tight_layout()
+    
+    # Plot magnitude responses of all RIRs
+    fig_rirs, ax_rirs = plt.subplots(figsize=(12, 6))
+    nfft_rir = 4096  # FFT size for RIR frequency response
+    freqs_rir = np.fft.rfftfreq(nfft_rir, d=1.0/sr)
+    smooth_window_rir = 31  # Smoothing window size (must be odd)
+    
+    # Get default color cycle
+    colors = plt.cm.tab10.colors
+    
+    for i, rir in enumerate(rirs):
+        H_rir = np.fft.rfft(rir, n=nfft_rir)
+        H_rir_mag_db = 20 * np.log10(np.abs(H_rir) + 1e-10)
+        
+        # Smoothed version (moving average)
+        H_rir_mag_db_smoothed = np.convolve(H_rir_mag_db, np.ones(smooth_window_rir)/smooth_window_rir, mode='same')
+        
+        color = colors[i % len(colors)]
+        # Original (dim, in background)
+        ax_rirs.semilogx(freqs_rir, H_rir_mag_db, linewidth=0.5, alpha=0.3, color=color)
+        # Smoothed (prominent, with label)
+        ax_rirs.semilogx(freqs_rir, H_rir_mag_db_smoothed, linewidth=1.5, label=f'RIR {i+1}', alpha=0.9, color=color)
+    
+    ax_rirs.set_xlabel("Frequency (Hz)")
+    ax_rirs.set_ylabel("Magnitude (dB)")
+    ax_rirs.set_title("Magnitude Responses of All RIRs")
+    ax_rirs.set_xlim([20, sr/2])
+    ax_rirs.legend()
+    ax_rirs.grid(True, alpha=0.3)
+    plt.tight_layout()
+    
     plt.ioff()  # Turn off interactive mode so plt.show() blocks
     plt.show()  # This will block until all figures are closed
 
