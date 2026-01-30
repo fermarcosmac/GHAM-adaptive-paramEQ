@@ -3,7 +3,7 @@ from pathlib import Path
 from unittest import case
 import numpy as np
 import matplotlib.pyplot as plt
-import torch, torchaudio
+import torch, torchaudio, torchmin
 import torch.nn.functional as F
 from torch.linalg import lstsq
 from torch.func import jacrev, jacfwd
@@ -207,7 +207,7 @@ def params_to_loss(EQ_params,
         case "FD-MSE" | "FD-SE":
 
             # # Deconvolve actual response within ROI limits
-            nfft = 2*frame_len
+            nfft = 2*frame_len-1
             freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
             Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
             X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
@@ -357,6 +357,34 @@ def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
 
 
 
+def torchmin_closure():
+    optimizer.zero_grad()
+
+    EQ_out_buffer_local = EQ_out_buffer.clone()
+    LEM_out_buffer_local = LEM_out_buffer.clone()
+    est_response_buffer_local = est_response_buffer.clone()
+
+    loss = params_to_loss(
+        EQ_params,
+        in_buffer,
+        EQ_out_buffer_local,     # pass clones
+        LEM_out_buffer_local,    # pass clones
+        est_response_buffer_local,
+        EQ,
+        LEM,
+        frame_len,
+        hop_len,
+        target_frame,
+        desired_response,
+        forget_factor,
+        loss_fcn,
+        loss_type,
+        sr,
+        ROI
+    )
+    return loss
+
+
 #%% MAIN SCRIPT
 
 if __name__ == "__main__":
@@ -370,7 +398,7 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 30.0                  # None = full length
+    max_audio_len_s = 10.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
@@ -378,11 +406,11 @@ if __name__ == "__main__":
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    optim_type = "Newton"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "Newton" or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.01*1e-2                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    scenario_type = "sudden"              # "constant", "sudden" or "smooth" (not implemented yet)
+    scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
     debug_plot_state = None                   # Debug plot state (set to None to disable, or {} to enable)
 
@@ -494,14 +522,18 @@ if __name__ == "__main__":
             raise ValueError("Muon optimizer requires newer PyTorch version.")
             mu = mu_opt / frame_len # TODO: check step size normalization carefully!
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
-        case "LBFGS":
-            raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
         case "GHAM-1":
             mu = mu_opt # TODO: check step size normalization carefully!
             eps_0 = 20*0.8 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
+        case "Newton":
+            mu = mu_opt
+            optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
+            closure = torchmin_closure
+        case "LBFGS":
+            raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
 
     # Build desired response: delay + optional target magnitude response
     total_delay = lem_delay + 7  # TODO: add EQ group delay if necessary. Hardcoded for now!
@@ -628,7 +660,22 @@ if __name__ == "__main__":
                     #update_ridge = ridge_regressor.w      # (num_params, 1)
                     EQ_params -= mu * update.view_as(EQ_params)
                 EQ_params.grad = None
-
+            case "Newton":
+                match loss_type:
+                    case "TD-MSE" | "FD-MSE":
+                        jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                    case "TD-SE" | "FD-SE":
+                        jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
+                hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                
+                with torch.no_grad():
+                    jac = jac.view(-1,1)
+                    update = lstsq(hess, jac).solution        # (num_params, 1)
+                    #ridge_regressor.fit(hess,jac)
+                    #update_ridge = ridge_regressor.w      # (num_params, 1)
+                    EQ_params -= mu * update.view_as(EQ_params)
             case _:
                 optimizer.zero_grad()
                 loss.backward()
