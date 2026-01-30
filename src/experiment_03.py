@@ -398,7 +398,7 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0                  # None = full length
+    max_audio_len_s = 5.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
@@ -407,11 +407,11 @@ if __name__ == "__main__":
     window_type = None                      # "hann" or None
     forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "Newton"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "Newton" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01*1e-2                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    mu_opt = 0.01*1e1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
+    n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
     debug_plot_state = None                   # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
@@ -528,10 +528,18 @@ if __name__ == "__main__":
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
-        case "Newton":
+        case "Newton" | "GHAM-2":
             mu = mu_opt
             optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
             closure = torchmin_closure
+            alpha_ridge = 1e-3
+            ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
+            match loss_type:
+                case "TD-MSE" | "FD-MSE":
+                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                case "TD-SE" | "FD-SE":
+                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
+            hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
         case "LBFGS":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
 
@@ -570,6 +578,7 @@ if __name__ == "__main__":
     loss_history = []
     jac_norm_history = []
     jac_cond_history = []
+    hess_cond_history = []
     irreducible_loss_history = []
 
     # Initialize buffers
@@ -661,21 +670,18 @@ if __name__ == "__main__":
                     EQ_params -= mu * update.view_as(EQ_params)
                 EQ_params.grad = None
             case "Newton":
-                match loss_type:
-                    case "TD-MSE" | "FD-MSE":
-                        jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
-                    case "TD-SE" | "FD-SE":
-                        jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
-                hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
                 jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
+                # Log Hessian condition number
+                hess_cond_history.append(torch.linalg.cond(hess.detach().cpu().float()).item())
+                
                 with torch.no_grad():
                     jac = jac.view(-1,1)
-                    update = lstsq(hess, jac).solution        # (num_params, 1)
-                    #ridge_regressor.fit(hess,jac)
-                    #update_ridge = ridge_regressor.w      # (num_params, 1)
-                    EQ_params -= mu * update.view_as(EQ_params)
+                    #update = lstsq(hess, jac).solution        # (num_params, 1)
+                    ridge_regressor.fit(hess,jac)
+                    update_ridge = ridge_regressor.w      # (num_params, 1)
+                    EQ_params -= mu * update_ridge.view_as(EQ_params)
             case _:
                 optimizer.zero_grad()
                 loss.backward()
@@ -737,11 +743,15 @@ if __name__ == "__main__":
     ax_log.legend(loc='upper left')
     ax_log.set_title("Loss Progression During Adaptation (Log Scale)")
     
-    # Right axis: Jacobian condition number (log)
-    if jac_cond_history:
+    # Right axis: Jacobian/Hessian condition number (log)
+    if jac_cond_history or hess_cond_history:
         ax_log_r = ax_log.twinx()
-        time_axis_cond = np.arange(len(jac_cond_history)) * hop_len / sr
-        ax_log_r.semilogy(time_axis_cond, jac_cond_history, linewidth=1, label='Jacobian Cond. Number', color='tab:green')
+        if jac_cond_history:
+            time_axis_cond = np.arange(len(jac_cond_history)) * hop_len / sr
+            ax_log_r.semilogy(time_axis_cond, jac_cond_history, linewidth=1, label='Jacobian Cond. Number', color='tab:green')
+        if hess_cond_history:
+            time_axis_hess = np.arange(len(hess_cond_history)) * hop_len / sr
+            ax_log_r.semilogy(time_axis_hess, hess_cond_history, linewidth=1, label='Hessian Cond. Number', color='tab:purple')
         ax_log_r.set_ylabel("Condition Number", color='tab:green')
         ax_log_r.tick_params(axis='y', labelcolor='tab:green')
         ax_log_r.legend(loc='upper right')
@@ -765,11 +775,15 @@ if __name__ == "__main__":
     ax_lin.legend(loc='upper left')
     ax_lin.set_title("Loss Progression During Adaptation (Linear Scale)")
     
-    # Right axis: Jacobian condition number (linear)
-    if jac_cond_history:
+    # Right axis: Jacobian/Hessian condition number (linear)
+    if jac_cond_history or hess_cond_history:
         ax_lin_r = ax_lin.twinx()
-        time_axis_cond = np.arange(len(jac_cond_history)) * hop_len / sr
-        ax_lin_r.plot(time_axis_cond, jac_cond_history, linewidth=1, label='Jacobian Cond. Number', color='tab:green')
+        if jac_cond_history:
+            time_axis_cond = np.arange(len(jac_cond_history)) * hop_len / sr
+            ax_lin_r.plot(time_axis_cond, jac_cond_history, linewidth=1, label='Jacobian Cond. Number', color='tab:green')
+        if hess_cond_history:
+            time_axis_hess = np.arange(len(hess_cond_history)) * hop_len / sr
+            ax_lin_r.plot(time_axis_hess, hess_cond_history, linewidth=1, label='Hessian Cond. Number', color='tab:purple')
         ax_lin_r.set_ylabel("Condition Number", color='tab:green')
         ax_lin_r.tick_params(axis='y', labelcolor='tab:green')
         ax_lin_r.legend(loc='upper right')
