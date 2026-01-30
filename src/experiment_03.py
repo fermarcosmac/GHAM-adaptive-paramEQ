@@ -406,7 +406,7 @@ if __name__ == "__main__":
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "Newton"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "Newton" or "Muon" TODO get newer PyTorch for Muon
+    optim_type = "GHAM-2"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "Newton", "GHAM-2" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 0.01*1e1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
@@ -682,6 +682,17 @@ if __name__ == "__main__":
                     ridge_regressor.fit(hess,jac)
                     update_ridge = ridge_regressor.w      # (num_params, 1)
                     EQ_params -= mu * update_ridge.view_as(EQ_params)
+
+            case "GHAM-2":
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                
+                loss_val = loss.detach() - torch.tensor(eps_0, device=device)
+                loss_val = loss_val.view(-1,1)
+                with torch.no_grad():
+                    theta_1 = lstsq(jac,loss_val).solution
+                    # TODO
+                    raise NotImplementedError("GHAM-2 update not fully implemented yet.")
             case _:
                 optimizer.zero_grad()
                 loss.backward()
