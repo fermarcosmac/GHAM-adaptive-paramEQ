@@ -382,8 +382,8 @@ if __name__ == "__main__":
     mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
+    scenario_type = "sudden"              # "constant", "sudden" or "smooth" (not implemented yet)
+    n_rirs = 2                              # Number of RIRs to simulate (for time-varying scenarios)
     debug_plot_state = {}                   # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
@@ -394,20 +394,25 @@ if __name__ == "__main__":
     rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
     match scenario_type:
         case "constant":
-            rir = rirs[0]
+            rir_init = rirs[0]
             sr = rirs_srs[0]
+        case "sudden":
+            # TODO: implement sudden scenario
+            rir_init = rirs[0]
+            sr = rirs_srs[0]
+            switch_times_norm = [t/n_rirs for t in range(1,n_rirs)]
         case _:
             raise NotImplementedError(f"Scenario type '{scenario_type}' not implemented yet.")
 
     # Desired response computation and initial EQ parameters
-    lem_delay = get_delay_from_ir(rir, sr)
-    EQ_comp_dict = get_compensation_EQ_params(rir, sr, ROI, num_sections=6)
+    lem_delay = get_delay_from_ir(rir_init, sr)
+    EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=6)
     target_mag_resp = EQ_comp_dict["target_response_db"]
     target_mag_freqs = EQ_comp_dict["freq_axis_smoothed"]
     # TODO: interpolate to actual FFT bin used later (frame_len)
 
     # Initialize the LEM estimate (assume LEM is well-identified)
-    LEM = torch.from_numpy(rir).view(1,1,-1).to(device)
+    LEM = torch.from_numpy(rir_init).view(1,1,-1).to(device)
     LEM_memory = LEM.shape[-1]
 
     # Initialize differentiable EQ
@@ -542,7 +547,7 @@ if __name__ == "__main__":
     LEM_out_len = frame_len + LEM_memory - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
     est_response_buffer = torch.zeros(1,1,frame_len, device=device) # TODO stabilize response estimation
-
+    rir_idx = 0
     
     # Main loop
     n_frames = (T - frame_len) // hop_len + 1
@@ -550,9 +555,21 @@ if __name__ == "__main__":
 
         start_idx = k * hop_len
 
+        # find first instance where start_idx/T is greater than a switch time
+        match scenario_type:
+            case "sudden":
+                current_idx = 0 
+                for switch_time in switch_times_norm:
+                    if (start_idx / T) >= switch_time:
+                        current_idx += 1
+                    if current_idx > rir_idx:
+                        rir_idx = current_idx
+                        LEM = torch.from_numpy(rirs[current_idx]).view(1,1,-1).to(device)
+        
         # Update input buffer and apply window
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
 
+        # Get target frame
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
 
         # I think jacrev (and jacfwd) forward the function to differentiate each time, so it's inefficient here.
