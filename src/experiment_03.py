@@ -306,6 +306,12 @@ def process_buffers(EQ_params,
                 smooth_window = 31  # Must be odd
                 H_mag_db_roi_smoothed = np.convolve(H_mag_db_roi, np.ones(smooth_window)/smooth_window, mode='same')
                 
+                # Compute LEM magnitude response within ROI
+                LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
+                LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
+                LEM_mag_db_roi = LEM_mag_db[roi_mask].detach().cpu().numpy()
+                LEM_mag_db_roi_smoothed = np.convolve(LEM_mag_db_roi, np.ones(smooth_window)/smooth_window, mode='same')
+                
                 # Initialize plot on first call
                 if debug_plot_state.get('fig') is None:
                     plt.ion()  # Enable interactive mode
@@ -313,24 +319,30 @@ def process_buffers(EQ_params,
                     line_raw, = ax.plot(freqs_roi, H_mag_db_roi, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
                     line_smooth, = ax.plot(freqs_roi, H_mag_db_roi_smoothed, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
                     line_desired, = ax.plot(freqs_roi, desired_mag_db[roi_mask].detach().cpu().numpy(), linewidth=1, label='Desired H(f)', color='tab:orange')
+                    line_lem_raw, = ax.plot(freqs_roi, LEM_mag_db_roi, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
+                    line_lem_smooth, = ax.plot(freqs_roi, LEM_mag_db_roi_smoothed, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
                     ax.set_xlabel("Frequency (Hz)")
                     ax.set_ylabel("Magnitude (dB)")
                     ax.set_xscale('log')
-                    ax.set_title("FD-MSE: Actual vs Desired Magnitude Response")
+                    ax.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM")
                     ax.legend(loc='lower left')
                     ax.grid(True, alpha=0.3)
-                    ax.set_ylim(-20, 30)  # Fixed y-axis range
+                    ax.set_ylim(-40, 30)  # Extended y-axis range for LEM
                     plt.tight_layout()
                     debug_plot_state['fig'] = fig
                     debug_plot_state['ax'] = ax
                     debug_plot_state['line_raw'] = line_raw
                     debug_plot_state['line_smooth'] = line_smooth
                     debug_plot_state['line_desired'] = line_desired
+                    debug_plot_state['line_lem_raw'] = line_lem_raw
+                    debug_plot_state['line_lem_smooth'] = line_lem_smooth
                 else:
                     # Update existing lines
                     debug_plot_state['line_raw'].set_ydata(H_mag_db_roi)
                     debug_plot_state['line_smooth'].set_ydata(H_mag_db_roi_smoothed)
                     debug_plot_state['line_desired'].set_ydata(desired_mag_db[roi_mask].detach().cpu().numpy())
+                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_roi)
+                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_roi_smoothed)
                 debug_plot_state['fig'].canvas.draw()
                 debug_plot_state['fig'].canvas.flush_events()
             
@@ -409,9 +421,9 @@ if __name__ == "__main__":
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 0.01#*1e1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
-    desired_response_type = "delay_only" # "delay_and_mag" or "delay_only"
-    scenario_type = "sudden"              # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 3                              # Number of RIRs to simulate (for time-varying scenarios)
+    desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
+    scenario_type = "smooth"                # "constant", "sudden" or "smooth" (not implemented yet)
+    n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
     debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
@@ -429,6 +441,17 @@ if __name__ == "__main__":
             rir_init = rirs[0]
             sr = rirs_srs[0]
             switch_times_norm = [t/n_rirs for t in range(1,n_rirs)]
+        case "smooth":
+            # Smooth transition between RIRs using convex combination
+            rir_init = rirs[0]
+            sr = rirs_srs[0]
+            # switch_times_norm defines when each new RIR segment starts
+            switch_times_norm = [t/n_rirs for t in range(1, n_rirs)]
+            # Precompute RIR tensors for efficient interpolation
+            rirs_tensors = [torch.from_numpy(rir).float().to(device) for rir in rirs]
+            # Pad all RIRs to the same length (max length)
+            max_rir_len = max(rir.shape[0] for rir in rirs_tensors)
+            rirs_tensors = [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in rirs_tensors]
         case _:
             raise NotImplementedError(f"Scenario type '{scenario_type}' not implemented yet.")
 
@@ -609,6 +632,29 @@ if __name__ == "__main__":
                     if current_idx > rir_idx:
                         rir_idx = current_idx
                         LEM = torch.from_numpy(rirs[current_idx]).view(1,1,-1).to(device)
+            case "smooth":
+                # Determine current segment and interpolation factor
+                t_norm = start_idx / T  # normalized time [0, 1)
+                segment_duration = 1.0 / n_rirs
+                
+                # Find which segment we're in (0 to n_rirs-1)
+                current_segment = min(int(t_norm * n_rirs), n_rirs - 1)
+                
+                # Calculate interpolation factor within current segment
+                # alpha = 0 at segment start, alpha = 1 at segment end
+                segment_start = current_segment * segment_duration
+                alpha = (t_norm - segment_start) / segment_duration
+                alpha = min(max(alpha, 0.0), 1.0)  # clamp to [0, 1]
+                
+                # For segment 0, no interpolation (just use first RIR)
+                # For segment i > 0, interpolate from rirs[i-1] to rirs[i]
+                if current_segment == 0:
+                    LEM = rirs_tensors[0].view(1, 1, -1)
+                else:
+                    prev_rir = rirs_tensors[current_segment - 1]
+                    curr_rir = rirs_tensors[current_segment]
+                    # Convex combination: (1 - alpha) * prev + alpha * curr
+                    LEM = ((1 - alpha) * prev_rir + alpha * curr_rir).view(1, 1, -1)
         
         # Update input buffer and apply window
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
@@ -659,6 +705,7 @@ if __name__ == "__main__":
                     case "TD-SE" | "FD-SE":
                         jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr=None,ROI=None).squeeze()
                 
+                # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 
                 # Log irreducible loss and jacobian condition number
@@ -693,6 +740,7 @@ if __name__ == "__main__":
                 jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI)
                 hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
+                # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 loss_val = loss_val.view(-1,1)
 
@@ -787,8 +835,8 @@ if __name__ == "__main__":
         ax_log_r.tick_params(axis='y', labelcolor='tab:green')
         ax_log_r.legend(loc='upper right')
     
-    # Add vertical lines at RIR switch times (for sudden scenario)
-    if scenario_type == "sudden" and 'switch_times_norm' in dir():
+    # Add vertical lines at RIR switch times (for sudden/smooth scenarios)
+    if scenario_type in ["sudden", "smooth"] and 'switch_times_norm' in dir():
         total_time = T / sr
         for switch_time_norm in switch_times_norm:
             switch_time_s = switch_time_norm * total_time
@@ -819,8 +867,8 @@ if __name__ == "__main__":
         ax_lin_r.tick_params(axis='y', labelcolor='tab:green')
         ax_lin_r.legend(loc='upper right')
     
-    # Add vertical lines at RIR switch times (for sudden scenario)
-    if scenario_type == "sudden" and 'switch_times_norm' in dir():
+    # Add vertical lines at RIR switch times (for sudden/smooth scenarios)
+    if scenario_type in ["sudden", "smooth"] and 'switch_times_norm' in dir():
         total_time = T / sr
         for switch_time_norm in switch_times_norm:
             switch_time_s = switch_time_norm * total_time
