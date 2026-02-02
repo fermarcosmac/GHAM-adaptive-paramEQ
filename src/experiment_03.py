@@ -398,21 +398,21 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0                  # None = full length
+    max_audio_len_s = 15.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024*8                      # Length (samples) of processing buffers
+    frame_len = 1024*2                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-3"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3" or "Muon" TODO get newer PyTorch for Muon
+    optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 0.01#*1e1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
-    desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    scenario_type = "constant"              # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 1                              # Number of RIRs to simulate (for time-varying scenarios)
-    debug_plot_state = {}                   # Debug plot state (set to None to disable, or {} to enable)
+    desired_response_type = "delay_only" # "delay_and_mag" or "delay_only"
+    scenario_type = "sudden"              # "constant", "sudden" or "smooth" (not implemented yet)
+    n_rirs = 3                              # Number of RIRs to simulate (for time-varying scenarios)
+    debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -524,11 +524,11 @@ if __name__ == "__main__":
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 20*0.8 # Irreducible error floor
+            eps_0 = 25*1.0 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
-        case "Newton" | "GHAM-3":
+        case "Newton" | "GHAM-3" | "GHAM-4":
             mu = mu_opt
             optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
             closure = torchmin_closure
@@ -541,6 +541,8 @@ if __name__ == "__main__":
                 case "TD-SE" | "FD-SE":
                     jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
             hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
+            if optim_type == "GHAM-4":
+                jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
         case "LBFGS":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
 
@@ -657,7 +659,7 @@ if __name__ == "__main__":
                     case "TD-SE" | "FD-SE":
                         jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr=None,ROI=None).squeeze()
                 
-                loss_val = loss.detach() - torch.tensor(eps_0, device=device)
+                loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 
                 # Log irreducible loss and jacobian condition number
                 irreducible_loss_history.append(loss_val.mean().item())
@@ -691,16 +693,26 @@ if __name__ == "__main__":
                 jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI)
                 hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
-                loss_val = loss.detach() - torch.tensor(eps_0, device=device)
+                loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 loss_val = loss_val.view(-1,1)
-                
+
+                # Log irreducible loss and jacobian condition number
+                irreducible_loss_history.append(loss_val.mean().item())
+                jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
 
                 with torch.no_grad():
                     theta_1 = -mu * lstsq(jac, loss_val).solution
                     theta_2 = (1-mu)*theta_1
-                    residual = -mu * theta_1.T@hess@theta_1 + jac@theta_2
-                    theta_3 = theta_2 + lstsq(jac,residual).solution
-                    EQ_params += (theta_1 + theta_2 + theta_3).view_as(EQ_params)
+                    residual_3 = -mu * theta_1.T@hess@theta_1 + jac@theta_2
+                    theta_3 = theta_2 + lstsq(jac,residual_3).solution
+                    if optim_type == "GHAM-3":
+                        correction = theta_1 + theta_2 + theta_3
+                    elif optim_type == "GHAM-4":
+                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        residual_4 = -mu * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
+                        theta_4 = theta_3 + lstsq(jac,residual_4).solution
+                        correction = theta_1 + theta_2 + theta_3 + theta_4
+                    EQ_params += correction.view_as(EQ_params)
             case _:
                 optimizer.zero_grad()
                 loss.backward()
@@ -817,7 +829,7 @@ if __name__ == "__main__":
     plt.tight_layout()
     
     # Plot magnitude responses of all RIRs
-    fig_rirs, ax_rirs = plt.subplots(figsize=(12, 6))
+    fig_rirs, ax_rirs = plt.subplots(figsize=(6, 5))
     nfft_rir = 4096  # FFT size for RIR frequency response
     freqs_rir = np.fft.rfftfreq(nfft_rir, d=1.0/sr)
     smooth_window_rir = 31  # Smoothing window size (must be odd)
