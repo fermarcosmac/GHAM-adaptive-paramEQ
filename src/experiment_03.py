@@ -229,7 +229,7 @@ def params_to_loss(EQ_params,
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
             
-            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
+            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Magnitude response MSE in log scale
             
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
@@ -296,7 +296,7 @@ def process_buffers(EQ_params,
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
             
-            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask]) # Magnitude response MSE in log scale
+            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Magnitude response MSE in log scale
 
             if debug_plot_state is not None:
                 freqs_roi = freqs[roi_mask].detach().cpu().numpy()
@@ -414,13 +414,13 @@ if __name__ == "__main__":
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024*2                      # Length (samples) of processing buffers
+    frame_len = 1024                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01#*1e1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
-    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.01#*1e-2                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    loss_type = "FD-SE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "smooth"                # "constant", "sudden" or "smooth" (not implemented yet)
     n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
@@ -551,6 +551,11 @@ if __name__ == "__main__":
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
+            match loss_type:
+                case "TD-MSE" | "FD-MSE":
+                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                case "TD-SE" | "FD-SE":
+                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
         case "Newton" | "GHAM-3" | "GHAM-4":
             mu = mu_opt
             optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
@@ -703,7 +708,7 @@ if __name__ == "__main__":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jacfwd(params_to_loss, argnums=0, has_aux=False)(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr=None,ROI=None).squeeze()
+                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
