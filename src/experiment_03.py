@@ -410,20 +410,20 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 15.0                  # None = full length
+    max_audio_len_s = 10.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024                      # Length (samples) of processing buffers
+    frame_len = 1024*2                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01#*1e-2                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
-    loss_type = "FD-SE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     scenario_type = "smooth"                # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
+    n_rirs = 3                              # Number of RIRs to simulate (for time-varying scenarios)
     debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
