@@ -1,0 +1,5 @@
+# Ignore everything inside data/SoundCam
+data/SoundCam/*
+
+# Except this file
+!data/SoundCam/.gitkeep

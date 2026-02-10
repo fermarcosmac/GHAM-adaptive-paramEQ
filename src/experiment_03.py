@@ -422,8 +422,8 @@ if __name__ == "__main__":
     mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    scenario_type = "smooth"                # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 3                              # Number of RIRs to simulate (for time-varying scenarios)
+    scenario_type = "sudden"                # "constant", "sudden" or "smooth" (not implemented yet)
+    n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
     debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
