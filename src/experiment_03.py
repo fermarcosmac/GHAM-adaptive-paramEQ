@@ -7,6 +7,7 @@ import torch, torchaudio, torchmin
 import torch.nn.functional as F
 from torch.linalg import lstsq
 from torch.func import jacrev, jacfwd
+from torch.nn.functional import l1_loss as MAE
 from scipy.signal import firls, freqz, minimum_phase
 from tqdm import tqdm
 root = Path(__file__).resolve().parent.parent
@@ -291,36 +292,53 @@ def process_buffers(EQ_params,
                 forget_factor = 1.0
             else:
                 forget_factor = forget_factor
+
+            # Compute magnitude responses
             H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
             H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
-            
-            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Magnitude response MSE in log scale
+            LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
+            LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
+
+            # ROI-limited responses (keep as tensors for validation_error computation)
+            H_mag_db_roi = H_mag_db[roi_mask]
+            H_mag_db_current_roi = H_mag_db_current[roi_mask]
+            LEM_mag_db_roi = LEM_mag_db[roi_mask]
+            desired_mag_db_roi = desired_mag_db[roi_mask]
+
+            # Smoothed version using PyTorch conv1d (moving average)
+            smooth_window = 31  # Must be odd
+            smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
+            padding = smooth_window // 2
+            H_mag_db_roi_smoothed = F.conv1d(H_mag_db_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            H_mag_db_current_roi_smoothed = F.conv1d(H_mag_db_current_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            LEM_mag_db_roi_smoothed = F.conv1d(LEM_mag_db_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            desired_mag_db_roi_smoothed = F.conv1d(desired_mag_db_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+
+            # TODO: estimate and plot LEM magnitude response as well (currently just the true LEM response, which is not available in practice but serves as a reference)
+            # We'll use it later for gradient injection!
+
+            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Nonsmoothed responses for loss
+            validation_error = MAE(H_mag_db_current_roi_smoothed, desired_mag_db_roi_smoothed) / MAE(LEM_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
 
             if debug_plot_state is not None:
-                freqs_roi = freqs[roi_mask].detach().cpu().numpy()
-                H_mag_db_roi = H_mag_db[roi_mask].detach().cpu().numpy()
-                
-                # Smoothed version of actual magnitude response (moving average)
-                smooth_window = 31  # Must be odd
-                H_mag_db_roi_smoothed = np.convolve(H_mag_db_roi, np.ones(smooth_window)/smooth_window, mode='same')
-                
-                # Compute LEM magnitude response within ROI
-                LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
-                LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
-                LEM_mag_db_roi = LEM_mag_db[roi_mask].detach().cpu().numpy()
-                LEM_mag_db_roi_smoothed = np.convolve(LEM_mag_db_roi, np.ones(smooth_window)/smooth_window, mode='same')
+                # Convert to numpy for plotting
+                freqs_roi_np = freqs[roi_mask].detach().cpu().numpy()
+                H_mag_db_roi_np = H_mag_db_roi.detach().cpu().numpy()
+                H_mag_db_roi_smoothed_np = H_mag_db_roi_smoothed.detach().cpu().numpy()
+                LEM_mag_db_roi_np = LEM_mag_db_roi.detach().cpu().numpy()
+                LEM_mag_db_roi_smoothed_np = LEM_mag_db_roi_smoothed.detach().cpu().numpy()
                 
                 # Initialize plot on first call
                 if debug_plot_state.get('fig') is None:
                     plt.ion()  # Enable interactive mode
                     fig, ax = plt.subplots(figsize=(12, 6))
-                    line_raw, = ax.plot(freqs_roi, H_mag_db_roi, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
-                    line_smooth, = ax.plot(freqs_roi, H_mag_db_roi_smoothed, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
-                    line_desired, = ax.plot(freqs_roi, desired_mag_db[roi_mask].detach().cpu().numpy(), linewidth=1, label='Desired H(f)', color='tab:orange')
-                    line_lem_raw, = ax.plot(freqs_roi, LEM_mag_db_roi, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
-                    line_lem_smooth, = ax.plot(freqs_roi, LEM_mag_db_roi_smoothed, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
+                    line_raw, = ax.plot(freqs_roi_np, H_mag_db_roi_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
+                    line_smooth, = ax.plot(freqs_roi_np, H_mag_db_roi_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
+                    line_desired, = ax.plot(freqs_roi_np, desired_mag_db_roi.detach().cpu().numpy(), linewidth=1, label='Desired H(f)', color='tab:orange')
+                    line_lem_raw, = ax.plot(freqs_roi_np, LEM_mag_db_roi_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
+                    line_lem_smooth, = ax.plot(freqs_roi_np, LEM_mag_db_roi_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
                     ax.set_xlabel("Frequency (Hz)")
                     ax.set_ylabel("Magnitude (dB)")
                     ax.set_xscale('log')
@@ -338,18 +356,18 @@ def process_buffers(EQ_params,
                     debug_plot_state['line_lem_smooth'] = line_lem_smooth
                 else:
                     # Update existing lines
-                    debug_plot_state['line_raw'].set_ydata(H_mag_db_roi)
-                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_roi_smoothed)
-                    debug_plot_state['line_desired'].set_ydata(desired_mag_db[roi_mask].detach().cpu().numpy())
-                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_roi)
-                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_roi_smoothed)
+                    debug_plot_state['line_raw'].set_ydata(H_mag_db_roi_np)
+                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_roi_smoothed_np)
+                    debug_plot_state['line_desired'].set_ydata(desired_mag_db_roi.detach().cpu().numpy())
+                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_roi_np)
+                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_roi_smoothed_np)
                 debug_plot_state['fig'].canvas.draw()
                 debug_plot_state['fig'].canvas.flush_events()
             
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
-    buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer)
+    buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer, validation_error)
 
     return loss, buffers
 
@@ -401,7 +419,7 @@ def torchmin_closure():
 
 if __name__ == "__main__":
 
-    torch.manual_seed(124)                  # Seed for reproducibility
+    torch.manual_seed(123)                  # Seed for reproducibility
 
     # Set paths
     base = Path(".")
@@ -410,21 +428,21 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 10.0                  # None = full length
+    max_audio_len_s = 20.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 1024*2                      # Length (samples) of processing buffers
+    frame_len = 2048                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
-    forget_factor = 0.05                     # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
+    forget_factor = 0.01                   # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    scenario_type = "sudden"                # "constant", "sudden" or "smooth" (not implemented yet)
-    n_rirs = 5                              # Number of RIRs to simulate (for time-varying scenarios)
-    debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
+    n_rirs = 4                              # Number of RIRs to simulate (1 = constant response)
+    transition_time_s = 2.0                 # Transition duration in seconds (0 = abrupt switch)
+    debug_plot_state = None                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -432,28 +450,24 @@ if __name__ == "__main__":
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
     rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
-    match scenario_type:
-        case "constant":
-            rir_init = rirs[0]
-            sr = rirs_srs[0]
-        case "sudden":
-            # TODO: implement sudden scenario
-            rir_init = rirs[0]
-            sr = rirs_srs[0]
-            switch_times_norm = [t/n_rirs for t in range(1,n_rirs)]
-        case "smooth":
-            # Smooth transition between RIRs using convex combination
-            rir_init = rirs[0]
-            sr = rirs_srs[0]
-            # switch_times_norm defines when each new RIR segment starts
-            switch_times_norm = [t/n_rirs for t in range(1, n_rirs)]
-            # Precompute RIR tensors for efficient interpolation
-            rirs_tensors = [torch.from_numpy(rir).float().to(device) for rir in rirs]
-            # Pad all RIRs to the same length (max length)
-            max_rir_len = max(rir.shape[0] for rir in rirs_tensors)
-            rirs_tensors = [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in rirs_tensors]
-        case _:
-            raise NotImplementedError(f"Scenario type '{scenario_type}' not implemented yet.")
+    rir_init = rirs[0]
+    sr = rirs_srs[0]
+    
+    # Precompute RIR tensors and transition times for time-varying scenarios
+    if n_rirs > 1:
+        rirs_tensors = [torch.from_numpy(rir).float().to(device) for rir in rirs]
+        # Pad all RIRs to the same length (max length)
+        max_rir_len = max(rir.shape[0] for rir in rirs_tensors)
+        rirs_tensors = [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in rirs_tensors]
+        
+        # Compute transition start/end times (in seconds)
+        # Each RIR segment stays constant until transition_center, then transitions over transition_time_s
+        segment_duration_s = max_audio_len_s / n_rirs
+        transition_times_s = []  # List of (start_time, end_time) tuples for each transition
+        for i in range(1, n_rirs):
+            transition_start_s = i * segment_duration_s  # Transition STARTS at segment boundary
+            transition_end_s = transition_start_s + transition_time_s  # Transition completes after transition_time_s
+            transition_times_s.append((transition_start_s, min(transition_end_s, max_audio_len_s)))
 
     # Desired response computation and initial EQ parameters
     lem_delay = get_delay_from_ir(rir_init, sr)
@@ -474,7 +488,7 @@ if __name__ == "__main__":
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
-    EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
+    EQ_memory = 128*0 # TODO: hardcoded for now (should be greater than 0)
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
@@ -607,6 +621,7 @@ if __name__ == "__main__":
         case _:
             raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
     loss_history = []
+    validation_error_history = []
     jac_norm_history = []
     jac_cond_history = []
     hess_cond_history = []
@@ -626,56 +641,43 @@ if __name__ == "__main__":
     for k in tqdm(range(n_frames), desc="Processing", unit="frame"):
 
         start_idx = k * hop_len
+        current_time_s = start_idx / sr
 
-        # find first instance where start_idx/T is greater than a switch time
-        match scenario_type:
-            case "sudden":
-                current_idx = 0 
-                for switch_time in switch_times_norm:
-                    if (start_idx / T) >= switch_time:
-                        current_idx += 1
-                    if current_idx > rir_idx:
-                        rir_idx = current_idx
-                        LEM = torch.from_numpy(rirs[current_idx]).view(1,1,-1).to(device)
-            case "smooth":
-                # Determine current segment and interpolation factor
-                t_norm = start_idx / T  # normalized time [0, 1)
-                segment_duration = 1.0 / n_rirs
-                
-                # Find which segment we're in (0 to n_rirs-1)
-                current_segment = min(int(t_norm * n_rirs), n_rirs - 1)
-                
-                # Calculate interpolation factor within current segment
-                # alpha = 0 at segment start, alpha = 1 at segment end
-                segment_start = current_segment * segment_duration
-                alpha = (t_norm - segment_start) / segment_duration
-                alpha = min(max(alpha, 0.0), 1.0)  # clamp to [0, 1]
-                
-                # For segment 0, no interpolation (just use first RIR)
-                # For segment i > 0, interpolate from rirs[i-1] to rirs[i]
-                if current_segment == 0:
-                    LEM = rirs_tensors[0].view(1, 1, -1)
-                else:
-                    prev_rir = rirs_tensors[current_segment - 1]
-                    curr_rir = rirs_tensors[current_segment]
-                    # Convex combination: (1 - alpha) * prev + alpha * curr
-                    LEM = ((1 - alpha) * prev_rir + alpha * curr_rir).view(1, 1, -1)
+        # Update LEM based on current time and transition schedule
+        if n_rirs > 1:
+            # Find which RIR segment we're in and compute interpolation
+            current_rir_idx = 0
+            in_transition = False
+            alpha = 0.0  # interpolation factor (0 = previous RIR, 1 = current RIR)
+            
+            for i, (t_start, t_end) in enumerate(transition_times_s):
+                if current_time_s >= t_end:
+                    # Past this transition entirely - use the new RIR
+                    current_rir_idx = i + 1
+                    in_transition = False
+                elif current_time_s >= t_start:
+                    # In the middle of this transition
+                    current_rir_idx = i + 1
+                    in_transition = True
+                    if t_end > t_start:  # smooth transition
+                        alpha = (current_time_s - t_start) / (t_end - t_start)
+                    else:  # abrupt (t_start == t_end)
+                        alpha = 1.0  # instant jump to new RIR
+                    break
+            
+            # Interpolate between RIRs if in transition
+            if in_transition and current_rir_idx > 0:
+                prev_rir = rirs_tensors[current_rir_idx - 1]
+                curr_rir = rirs_tensors[current_rir_idx]
+                LEM = ((1 - alpha) * prev_rir + alpha * curr_rir).view(1, 1, -1)
+            else:
+                LEM = rirs_tensors[current_rir_idx].view(1, 1, -1)
         
         # Update input buffer and apply window
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
 
         # Get target frame
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
-
-        # I think jacrev (and jacfwd) forward the function to differentiate each time, so it's inefficient here.
-        #grad_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
-        #hess_fcn = jacfwd(grad_fcn, argnums=0, has_aux=False)
-        #jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
-        #jac4_fcn = jacfwd(jac3_fcn, argnums=0, has_aux=False)
-        #grad = grad_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        #hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        #jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
-        #jac4 = jac4_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,EQ,LEM,frame_len,hop_len,target_frame,loss_fcn).squeeze()
 
         loss, buffers = process_buffers(EQ_params,
             in_buffer,
@@ -694,9 +696,10 @@ if __name__ == "__main__":
             sr=sr,
             ROI=ROI,
             debug_plot_state=debug_plot_state)
-        EQ_out_buffer, LEM_out_buffer, est_response_buffer = buffers
+        EQ_out_buffer, LEM_out_buffer, est_response_buffer, validation_error = buffers
 
         loss_history.append(torch.mean(loss).item())
+        validation_error_history.append(validation_error.item())
 
         #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
 
@@ -812,11 +815,11 @@ if __name__ == "__main__":
     print(f"  - output_controlled.wav: Output after EQ and LEM")
     print(f"  - desired_output.wav: Target/desired output signal")
 
-    # Plot loss progression (2x1 subplot: log scale on top, linear scale on bottom)
-    fig, (ax_log, ax_lin) = plt.subplots(2, 1, figsize=(6, 5), sharex=True)
+    # Plot loss and validation error progression (3x1 subplot grid)
+    fig, (ax_log, ax_lin, ax_val) = plt.subplots(3, 1, figsize=(6, 7), sharex=True)
     time_axis = np.arange(len(loss_history)) * hop_len / sr
     
-    # ---- Top subplot: Log scale ----
+    # ---- Top subplot: Loss (Log scale) ----
     # Left axis: Loss and Irreducible Loss
     ax_log.semilogy(time_axis, loss_history, linewidth=1, label='Loss', color='tab:blue')
     if irreducible_loss_history:
@@ -825,7 +828,7 @@ if __name__ == "__main__":
     ax_log.set_ylabel("Loss (log)")
     ax_log.grid(True, alpha=0.3)
     ax_log.legend(loc='upper left')
-    ax_log.set_title("Loss Progression During Adaptation (Log Scale)")
+    ax_log.set_title("Loss (Log Scale)")
     
     # Right axis: Jacobian/Hessian condition number (log)
     if jac_cond_history or hess_cond_history:
@@ -840,24 +843,25 @@ if __name__ == "__main__":
         ax_log_r.tick_params(axis='y', labelcolor='tab:green')
         ax_log_r.legend(loc='upper right')
     
-    # Add vertical lines at RIR switch times (for sudden/smooth scenarios)
-    if scenario_type in ["sudden", "smooth"] and 'switch_times_norm' in dir():
-        total_time = T / sr
-        for switch_time_norm in switch_times_norm:
-            switch_time_s = switch_time_norm * total_time
-            ax_log.axvline(x=switch_time_s, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+    # Add vertical lines at RIR transition times
+    if n_rirs > 1:
+        for t_start, t_end in transition_times_s:
+            if t_start == t_end:
+                ax_log.axvline(x=t_start, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            else:
+                ax_log.axvline(x=t_start, color='green', linestyle='--', linewidth=1.5, alpha=0.8)
+                ax_log.axvline(x=t_end, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
     
-    # ---- Bottom subplot: Linear scale ----
+    # ---- Middle subplot: Loss (Linear scale) ----
     # Left axis: Loss and Irreducible Loss
     ax_lin.plot(time_axis, loss_history, linewidth=1, label='Loss', color='tab:blue')
     if irreducible_loss_history:
         time_axis_irr = np.arange(len(irreducible_loss_history)) * hop_len / sr
         ax_lin.plot(time_axis_irr, irreducible_loss_history, linewidth=1, label='Irreducible Loss', color='tab:orange')
-    ax_lin.set_xlabel("Time (s)")
     ax_lin.set_ylabel("Loss (linear)")
     ax_lin.grid(True, alpha=0.3)
     ax_lin.legend(loc='upper left')
-    ax_lin.set_title("Loss Progression During Adaptation (Linear Scale)")
+    ax_lin.set_title("Loss (Linear Scale)")
     
     # Right axis: Jacobian/Hessian condition number (linear)
     if jac_cond_history or hess_cond_history:
@@ -872,12 +876,33 @@ if __name__ == "__main__":
         ax_lin_r.tick_params(axis='y', labelcolor='tab:green')
         ax_lin_r.legend(loc='upper right')
     
-    # Add vertical lines at RIR switch times (for sudden/smooth scenarios)
-    if scenario_type in ["sudden", "smooth"] and 'switch_times_norm' in dir():
-        total_time = T / sr
-        for switch_time_norm in switch_times_norm:
-            switch_time_s = switch_time_norm * total_time
-            ax_lin.axvline(x=switch_time_s, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+    # Add vertical lines at RIR transition times
+    if n_rirs > 1:
+        for t_start, t_end in transition_times_s:
+            if t_start == t_end:
+                ax_lin.axvline(x=t_start, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            else:
+                ax_lin.axvline(x=t_start, color='green', linestyle='--', linewidth=1.5, alpha=0.8)
+                ax_lin.axvline(x=t_end, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+    
+    # ---- Bottom subplot: Validation Error (Linear scale) ----
+    time_axis_val = np.arange(len(validation_error_history)) * hop_len / sr
+    ax_val.plot(time_axis_val, validation_error_history, linewidth=1, label='Validation Error', color='tab:red')
+    ax_val.axhline(y=1.0, color='gray', linestyle='--', linewidth=1, alpha=0.8, label='Baseline (no EQ)')
+    ax_val.set_xlabel("Time (s)")
+    ax_val.set_ylabel("Validation Error")
+    ax_val.grid(True, alpha=0.3)
+    ax_val.legend(loc='upper left')
+    ax_val.set_title("Validation Error (Linear Scale)")
+    
+    # Add vertical lines at RIR transition times
+    if n_rirs > 1:
+        for t_start, t_end in transition_times_s:
+            if t_start == t_end:
+                ax_val.axvline(x=t_start, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
+            else:
+                ax_val.axvline(x=t_start, color='green', linestyle='--', linewidth=1.5, alpha=0.8)
+                ax_val.axvline(x=t_end, color='red', linestyle='--', linewidth=1.5, alpha=0.8)
     
     plt.tight_layout()
     
