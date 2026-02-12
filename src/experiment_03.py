@@ -229,9 +229,17 @@ def params_to_loss(EQ_params,
             H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
+
+            # Smoothed versions (frequency domain)
+            smooth_window = 31  # Must be odd
+            smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
+            padding = smooth_window // 2
+            H_mag_db_roi_smoothed = F.conv1d(H_mag_db[roi_mask].view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            desired_mag_db_roi_smoothed = F.conv1d(desired_mag_db[roi_mask].view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
             
-            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Magnitude response MSE in log scale
-            
+            #loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Magnitude response MSE in log scale
+            loss = loss_fcn(H_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
+
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
@@ -319,8 +327,10 @@ def process_buffers(EQ_params,
             # TODO: estimate and plot LEM magnitude response as well (currently just the true LEM response, which is not available in practice but serves as a reference)
             # We'll use it later for gradient injection!
 
-            loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Nonsmoothed responses for loss
-            validation_error = MAE(H_mag_db_current_roi_smoothed, desired_mag_db_roi_smoothed) / MAE(LEM_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
+            #loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Nonsmoothed responses for loss
+            loss = loss_fcn(H_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
+            validation_error = MAE(H_mag_db_roi_smoothed, desired_mag_db_roi_smoothed) / MAE(LEM_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
+            #validation_error = MAE(H_mag_db_current_roi, desired_mag_db_roi) / MAE(LEM_mag_db_roi, desired_mag_db_roi)
 
             if debug_plot_state is not None:
                 # Convert to numpy for plotting
@@ -427,22 +437,22 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "white_noise"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 20.0                  # None = full length
+    input_type = "onde_day_funk.wav"              # Either a file or a valid synthesisable signal
+    max_audio_len_s = 15.0                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
     frame_len = 2048                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
-    forget_factor = 0.01                   # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
+    forget_factor = 0.05                   # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
     optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    n_rirs = 4                              # Number of RIRs to simulate (1 = constant response)
-    transition_time_s = 2.0                 # Transition duration in seconds (0 = abrupt switch)
-    debug_plot_state = None                 # Debug plot state (set to None to disable, or {} to enable)
+    n_rirs = 3                              # Number of RIRs to simulate (1 = constant response)
+    transition_time_s = 1.0                 # Transition duration in seconds (0 = abrupt switch)
+    debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -483,12 +493,12 @@ if __name__ == "__main__":
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
     #init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: It's pretty sensitive to initial parameters
-    #init_params_tensor = torch.zeros(1,EQ.num_params) # random initialization
+    #init_params_tensor = torch.zeros(1,EQ.num_params) # zeros initialization
     # Uncomment lines below to use initial compenation EQ params as initialization
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
-    EQ_memory = 128*0 # TODO: hardcoded for now (should be greater than 0)
+    EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
@@ -561,7 +571,7 @@ if __name__ == "__main__":
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 25*1.0 # Irreducible error floor
+            eps_0 = 3 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
@@ -574,7 +584,7 @@ if __name__ == "__main__":
             mu = mu_opt
             optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
             closure = torchmin_closure
-            eps_0 = 20*1.0 # Irreducible error floor
+            eps_0 = 25 # Irreducible error floor
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
