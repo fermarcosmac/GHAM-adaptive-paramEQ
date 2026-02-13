@@ -173,6 +173,61 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
 
 
 
+def interp_to_log_freq(mag_db, freqs_lin, n_points=None, f_min=None, f_max=None):
+    """Interpolate magnitude response from linear to log-spaced frequency bins.
+    
+    This enables perceptually-uniform smoothing: lower frequencies get more detail,
+    higher frequencies get less, matching human hearing characteristics.
+    
+    Args:
+        mag_db: Magnitude response in dB (1D tensor on linear freq bins)
+        freqs_lin: Linear frequency axis (1D tensor)
+        n_points: Number of log-spaced points (default: same as input)
+        f_min: Minimum frequency (default: first non-zero freq)
+        f_max: Maximum frequency (default: last freq)
+    
+    Returns:
+        mag_db_log: Magnitude response at log-spaced frequencies
+        freqs_log: Log-spaced frequency axis
+    """
+    if n_points is None:
+        n_points = len(freqs_lin)
+    if f_min is None:
+        f_min = freqs_lin[freqs_lin > 0][0].item()  # Skip DC
+    if f_max is None:
+        f_max = freqs_lin[-1].item()
+    
+    # Create log-spaced frequency points
+    freqs_log = torch.logspace(
+        torch.log10(torch.tensor(f_min, device=mag_db.device)),
+        torch.log10(torch.tensor(f_max, device=mag_db.device)),
+        n_points,
+        device=mag_db.device
+    )
+    
+    # Linear interpolation: find indices and weights
+    indices = torch.searchsorted(freqs_lin.contiguous(), freqs_log.contiguous())
+    indices = torch.clamp(indices, 1, len(freqs_lin) - 1)  # Ensure valid indices
+    
+    # Get surrounding values and frequencies
+    idx_low = indices - 1
+    idx_high = indices
+    
+    f_low = freqs_lin[idx_low]
+    f_high = freqs_lin[idx_high]
+    mag_low = mag_db[idx_low]
+    mag_high = mag_db[idx_high]
+    
+    # Linear interpolation weights
+    weights = (freqs_log - f_low) / (f_high - f_low + 1e-10)
+    weights = torch.clamp(weights, 0, 1)
+    
+    # Interpolate
+    mag_db_log = mag_low + weights * (mag_high - mag_low)
+    
+    return mag_db_log, freqs_log
+
+
 def params_to_loss(EQ_params,
             in_buffer,
             EQ_out_buffer,
@@ -230,15 +285,24 @@ def params_to_loss(EQ_params,
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
 
-            # Smoothed versions (frequency domain)
-            smooth_window = 31  # Must be odd
+            # ROI-limited responses
+            freqs_roi = freqs[roi_mask]
+            H_mag_db_roi = H_mag_db[roi_mask]
+            desired_mag_db_roi = desired_mag_db[roi_mask]
+
+            # Resample to log-frequency axis for perceptually-uniform processing
+            n_log_points = 256  # Number of log-spaced frequency points
+            H_mag_db_log, _ = interp_to_log_freq(H_mag_db_roi, freqs_roi, n_points=n_log_points)
+            desired_mag_db_log, _ = interp_to_log_freq(desired_mag_db_roi, freqs_roi, n_points=n_log_points)
+
+            # Smooth on log-frequency axis using PyTorch conv1d (moving average)
+            smooth_window = 15  # Kernel size (odd)
             smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
             padding = smooth_window // 2
-            H_mag_db_roi_smoothed = F.conv1d(H_mag_db[roi_mask].view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            desired_mag_db_roi_smoothed = F.conv1d(desired_mag_db[roi_mask].view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
             
-            #loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Magnitude response MSE in log scale
-            loss = loss_fcn(H_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
+            loss = loss_fcn(H_mag_db_log_smoothed, desired_mag_db_log_smoothed)
 
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
@@ -309,50 +373,59 @@ def process_buffers(EQ_params,
             LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
             LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
 
-            # ROI-limited responses (keep as tensors for validation_error computation)
+            # ROI-limited responses (keep as tensors)
+            freqs_roi = freqs[roi_mask]
             H_mag_db_roi = H_mag_db[roi_mask]
             H_mag_db_current_roi = H_mag_db_current[roi_mask]
             LEM_mag_db_roi = LEM_mag_db[roi_mask]
             desired_mag_db_roi = desired_mag_db[roi_mask]
 
-            # Smoothed version using PyTorch conv1d (moving average)
-            smooth_window = 31  # Must be odd
+            # Resample to log-frequency axis for perceptually-uniform processing
+            n_log_points = 256  # Number of log-spaced frequency points
+            H_mag_db_log, freqs_log = interp_to_log_freq(H_mag_db_roi, freqs_roi, n_points=n_log_points)
+            H_mag_db_current_log, _ = interp_to_log_freq(H_mag_db_current_roi, freqs_roi, n_points=n_log_points)
+            LEM_mag_db_log, _ = interp_to_log_freq(LEM_mag_db_roi, freqs_roi, n_points=n_log_points)
+            desired_mag_db_log, _ = interp_to_log_freq(desired_mag_db_roi, freqs_roi, n_points=n_log_points)
+
+            # Smooth on log-frequency axis using PyTorch conv1d (moving average)
+            # This gives more detail at low frequencies, less at high frequencies (perceptually uniform)
+            smooth_window = 15  # Kernel size (odd), smaller than before since we have fewer points
             smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
             padding = smooth_window // 2
-            H_mag_db_roi_smoothed = F.conv1d(H_mag_db_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            H_mag_db_current_roi_smoothed = F.conv1d(H_mag_db_current_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            LEM_mag_db_roi_smoothed = F.conv1d(LEM_mag_db_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            desired_mag_db_roi_smoothed = F.conv1d(desired_mag_db_roi.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            H_mag_db_current_log_smoothed = F.conv1d(H_mag_db_current_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            LEM_mag_db_log_smoothed = F.conv1d(LEM_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
 
             # TODO: estimate and plot LEM magnitude response as well (currently just the true LEM response, which is not available in practice but serves as a reference)
             # We'll use it later for gradient injection!
 
-            #loss = loss_fcn(H_mag_db[roi_mask], desired_mag_db[roi_mask])  # Nonsmoothed responses for loss
-            loss = loss_fcn(H_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
-            validation_error = MAE(H_mag_db_roi_smoothed, desired_mag_db_roi_smoothed) / MAE(LEM_mag_db_roi_smoothed, desired_mag_db_roi_smoothed)
-            #validation_error = MAE(H_mag_db_current_roi, desired_mag_db_roi) / MAE(LEM_mag_db_roi, desired_mag_db_roi)
+            # Compute loss and validation error on log-frequency smoothed responses
+            loss = loss_fcn(H_mag_db_log_smoothed, desired_mag_db_log_smoothed)
+            validation_error = MAE(H_mag_db_log_smoothed, desired_mag_db_log_smoothed) / MAE(LEM_mag_db_log_smoothed, desired_mag_db_log_smoothed)
 
             if debug_plot_state is not None:
-                # Convert to numpy for plotting
-                freqs_roi_np = freqs[roi_mask].detach().cpu().numpy()
-                H_mag_db_roi_np = H_mag_db_roi.detach().cpu().numpy()
-                H_mag_db_roi_smoothed_np = H_mag_db_roi_smoothed.detach().cpu().numpy()
-                LEM_mag_db_roi_np = LEM_mag_db_roi.detach().cpu().numpy()
-                LEM_mag_db_roi_smoothed_np = LEM_mag_db_roi_smoothed.detach().cpu().numpy()
+                # Convert to numpy for plotting (use log-frequency data)
+                freqs_log_np = freqs_log.detach().cpu().numpy()
+                H_mag_db_log_np = H_mag_db_log.detach().cpu().numpy()
+                H_mag_db_log_smoothed_np = H_mag_db_log_smoothed.detach().cpu().numpy()
+                LEM_mag_db_log_np = LEM_mag_db_log.detach().cpu().numpy()
+                LEM_mag_db_log_smoothed_np = LEM_mag_db_log_smoothed.detach().cpu().numpy()
+                desired_mag_db_log_np = desired_mag_db_log.detach().cpu().numpy()
                 
                 # Initialize plot on first call
                 if debug_plot_state.get('fig') is None:
                     plt.ion()  # Enable interactive mode
                     fig, ax = plt.subplots(figsize=(12, 6))
-                    line_raw, = ax.plot(freqs_roi_np, H_mag_db_roi_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
-                    line_smooth, = ax.plot(freqs_roi_np, H_mag_db_roi_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
-                    line_desired, = ax.plot(freqs_roi_np, desired_mag_db_roi.detach().cpu().numpy(), linewidth=1, label='Desired H(f)', color='tab:orange')
-                    line_lem_raw, = ax.plot(freqs_roi_np, LEM_mag_db_roi_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
-                    line_lem_smooth, = ax.plot(freqs_roi_np, LEM_mag_db_roi_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
+                    line_raw, = ax.plot(freqs_log_np, H_mag_db_log_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
+                    line_smooth, = ax.plot(freqs_log_np, H_mag_db_log_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
+                    line_desired, = ax.plot(freqs_log_np, desired_mag_db_log_np, linewidth=1, label='Desired H(f)', color='tab:orange')
+                    line_lem_raw, = ax.plot(freqs_log_np, LEM_mag_db_log_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
+                    line_lem_smooth, = ax.plot(freqs_log_np, LEM_mag_db_log_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
                     ax.set_xlabel("Frequency (Hz)")
                     ax.set_ylabel("Magnitude (dB)")
                     ax.set_xscale('log')
-                    ax.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM")
+                    ax.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM (log-freq smoothing)")
                     ax.legend(loc='lower left')
                     ax.grid(True, alpha=0.3)
                     ax.set_ylim(-40, 30)  # Extended y-axis range for LEM
@@ -366,11 +439,11 @@ def process_buffers(EQ_params,
                     debug_plot_state['line_lem_smooth'] = line_lem_smooth
                 else:
                     # Update existing lines
-                    debug_plot_state['line_raw'].set_ydata(H_mag_db_roi_np)
-                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_roi_smoothed_np)
-                    debug_plot_state['line_desired'].set_ydata(desired_mag_db_roi.detach().cpu().numpy())
-                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_roi_np)
-                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_roi_smoothed_np)
+                    debug_plot_state['line_raw'].set_ydata(H_mag_db_log_np)
+                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_log_smoothed_np)
+                    debug_plot_state['line_desired'].set_ydata(desired_mag_db_log_np)
+                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_log_np)
+                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_log_smoothed_np)
                 debug_plot_state['fig'].canvas.draw()
                 debug_plot_state['fig'].canvas.flush_events()
             
@@ -446,13 +519,14 @@ if __name__ == "__main__":
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                   # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-1"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 0.01#*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    optim_type = "GHAM-2"                   # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
+    mu_opt = 0.01*1e-1                      # Learning rate for controller (*1e3  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    eps_0 = 3.0                             # Irreducible error floor
     desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    n_rirs = 3                              # Number of RIRs to simulate (1 = constant response)
+    n_rirs = 1                              # Number of RIRs to simulate (1 = constant response)
     transition_time_s = 1.0                 # Transition duration in seconds (0 = abrupt switch)
-    debug_plot_state = {}                 # Debug plot state (set to None to disable, or {} to enable)
+    debug_plot_state = None                 # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -571,7 +645,6 @@ if __name__ == "__main__":
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
             mu = mu_opt # TODO: check step size normalization carefully!
-            eps_0 = 3 # Irreducible error floor
             optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
@@ -584,7 +657,6 @@ if __name__ == "__main__":
             mu = mu_opt
             optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
             closure = torchmin_closure
-            eps_0 = 25 # Irreducible error floor
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
@@ -643,7 +715,8 @@ if __name__ == "__main__":
     EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
     LEM_out_len = frame_len + LEM_memory - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
-    est_response_buffer = torch.zeros(1,1,frame_len, device=device) # TODO stabilize response estimation
+    est_response_buffer = torch.zeros(1,1,frame_len, device=device)
+    EQ_params_buffer = EQ_params.clone().detach()
     rir_idx = 0
     
     # Main loop
