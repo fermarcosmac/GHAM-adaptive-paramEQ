@@ -1,4 +1,4 @@
-import sys
+import sys, math
 from pathlib import Path
 from unittest import case
 import numpy as np
@@ -26,6 +26,104 @@ from utils import (
 )
 
 # NOTE 1: careful with the gradients you compute. If different samples are generated using different EQ parameters
+def _unwrap_phase(phase: torch.Tensor) -> torch.Tensor:
+    """
+    Unwrap a 1-D phase tensor (radians) along its only axis.
+    Implements the same idea as numpy.unwrap: replace jumps > pi by their 2*pi complement.
+    """
+    # phase: 1-D tensor (N,)
+    if phase.numel() <= 1:
+        return phase.clone()
+    diff = phase[1:] - phase[:-1]                       # (N-1,)
+    # wrap diffs into (-pi, pi]
+    two_pi = 2.0 * math.pi
+    wrapped = (diff + math.pi) % two_pi - math.pi      # (N-1,)
+    # correction to apply to each subsequent element: wrapped - diff
+    corr = torch.cat([torch.tensor([0.], device=phase.device, dtype=phase.dtype),
+                      torch.cumsum(wrapped - diff, dim=0)])
+    return phase + corr
+
+
+
+def interpolate_IRs(alpha, prev_rir: torch.Tensor, curr_rir: torch.Tensor) -> torch.Tensor:
+    """
+    Interpolate between two RIRs by interpolating magnitude (in dB) and unwrapped phase.
+
+    Args:
+        alpha: scalar in [0,1] (0 -> prev_rir, 1 -> curr_rir). Can be Python float or 0-dim tensor.
+        prev_rir: 1-D torch tensor (num_samples,) or 2/3-D variant (we'll squeeze). On device.
+        curr_rir: same shape as prev_rir or will be padded to match.
+
+    Returns:
+        interpolated_ir: torch.Tensor shaped (1, 1, N) where N == max(len(prev_rir), len(curr_rir))
+    """
+    # Convert alpha to float on CPU (safe) or to tensor on device
+    if isinstance(alpha, torch.Tensor):
+        alpha_val = float(alpha.item())
+    else:
+        alpha_val = float(alpha)
+
+    # Squeeze input RIRs to 1-D
+    x1 = prev_rir.detach().squeeze().to(torch.get_default_dtype())
+    x2 = curr_rir.detach().squeeze().to(torch.get_default_dtype())
+
+    # Move to same device
+    device = prev_rir.device if isinstance(prev_rir, torch.Tensor) else torch.device("cpu")
+    x1 = x1.to(device)
+    x2 = x2.to(device)
+
+    # Pad to same length if necessary
+    n1 = x1.numel()
+    n2 = x2.numel()
+    n = max(n1, n2)
+    if n1 < n:
+        x1 = F.pad(x1, (0, n - n1))
+    if n2 < n:
+        x2 = F.pad(x2, (0, n - n2))
+
+    # FFT size (use same length as time-domain signals)
+    nfft = n
+
+    # Compute complex frequency responses (rfft)
+    H1 = torch.fft.rfft(x1, n=nfft)
+    H2 = torch.fft.rfft(x2, n=nfft)
+
+    eps = 1e-12
+
+    # Magnitudes and phases
+    mag1 = torch.abs(H1)
+    mag2 = torch.abs(H2)
+
+    # Convert magnitude to dB for interpolation (more perceptually linear)
+    mag_db1 = 20.0 * torch.log10(mag1 + eps)
+    mag_db2 = 20.0 * torch.log10(mag2 + eps)
+
+    # Phases (atan2)
+    phase1 = torch.atan2(H1.imag, H1.real)
+    phase2 = torch.atan2(H2.imag, H2.real)
+
+    # Unwrap phases along frequency axis
+    # rfft returns length floor(nfft/2)+1 bins — unwrap works on that 1D array
+    phase1_un = _unwrap_phase(phase1)
+    phase2_un = _unwrap_phase(phase2)
+
+    # Interpolate magnitude-in-dB and unwrapped phase
+    mag_db_interp = (1.0 - alpha_val) * mag_db1 + alpha_val * mag_db2
+    phase_interp = (1.0 - alpha_val) * phase1_un + alpha_val * phase2_un
+
+    # Reconstruct complex spectrum from mag+phase
+    mag_lin = 10.0 ** (mag_db_interp / 20.0)
+
+    real = mag_lin * torch.cos(phase_interp)
+    imag = mag_lin * torch.sin(phase_interp)
+    H_interp = torch.complex(real, imag)
+
+    # IFFT back to time domain (real signal)
+    h_interp = torch.fft.irfft(H_interp, n=nfft)
+
+    # Return as shape (1,1,-1) to match how LEM is used elsewhere
+    return h_interp.view(1, 1, -1).to(device)
+
 
 
 def frame_analysis_plot(in_buffer, EQ_out, LEM_out, target_frame, frame_idx=None):
@@ -68,6 +166,7 @@ def frame_analysis_plot(in_buffer, EQ_out, LEM_out, target_frame, frame_idx=None
     
     plt.tight_layout()
     plt.show()
+
 
 
 def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
@@ -226,6 +325,7 @@ def interp_to_log_freq(mag_db, freqs_lin, n_points=None, f_min=None, f_max=None)
     mag_db_log = mag_low + weights * (mag_high - mag_low)
     
     return mag_db_log, freqs_log
+
 
 
 def params_to_loss(EQ_params,
@@ -469,7 +569,6 @@ def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
 
 
 
-
 def torchmin_closure():
     optimizer.zero_grad()
 
@@ -510,21 +609,21 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "onde_day_funk.wav"              # Either a file or a valid synthesisable signal
-    max_audio_len_s = 15.0                  # None = full length
+    input_type = "metal_flute.mp3"              # Either a file or a valid synthesisable signal
+    max_audio_len_s = 15.0*16                  # None = full length
 
     # Simulation configuration
     ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 2048                      # Length (samples) of processing buffers
+    frame_len = 2048*4                      # Length (samples) of processing buffers
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
-    forget_factor = 0.05                   # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-2"                      # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
+    forget_factor = 0.05                    # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
+    optim_type = "SGD"                      # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 1e-3                           # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
-    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
-    eps_0 = 5.0                             # Irreducible error floor
-    desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    n_rirs = 1                              # Number of RIRs to simulate (1 = constant response)
+    loss_type = "TD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    eps_0 = 1.0                             # Irreducible error floor
+    desired_response_type = "delay_only" # "delay_and_mag" or "delay_only"
+    n_rirs = 3                              # Number of RIRs to simulate (1 = constant response)
     transition_time_s = 1.0                 # Transition duration in seconds (0 = abrupt switch)
     debug_plot_state = None                  # Debug plot state (set to None to disable, or {} to enable)
 
@@ -752,7 +851,8 @@ if __name__ == "__main__":
             if in_transition and current_rir_idx > 0:
                 prev_rir = rirs_tensors[current_rir_idx - 1]
                 curr_rir = rirs_tensors[current_rir_idx]
-                LEM = ((1 - alpha) * prev_rir + alpha * curr_rir).view(1, 1, -1)
+                LEM = interpolate_IRs(alpha, prev_rir, curr_rir)
+                #LEM = ((1 - alpha) * prev_rir + alpha * curr_rir).view(1, 1, -1)
             else:
                 LEM = rirs_tensors[current_rir_idx].view(1, 1, -1)
         
