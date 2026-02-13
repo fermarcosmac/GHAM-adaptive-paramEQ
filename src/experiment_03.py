@@ -618,11 +618,11 @@ if __name__ == "__main__":
     hop_len = frame_len                     # Stride between frames
     window_type = None                      # "hann" or None
     forget_factor = 0.05                    # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "SGD"                      # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
+    optim_type = "GHAM-1"                      # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
     mu_opt = 1e-3                           # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
-    loss_type = "TD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
+    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
     eps_0 = 1.0                             # Irreducible error floor
-    desired_response_type = "delay_only" # "delay_and_mag" or "delay_only"
+    desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
     n_rirs = 3                              # Number of RIRs to simulate (1 = constant response)
     transition_time_s = 1.0                 # Transition duration in seconds (0 = abrupt switch)
     debug_plot_state = None                  # Debug plot state (set to None to disable, or {} to enable)
