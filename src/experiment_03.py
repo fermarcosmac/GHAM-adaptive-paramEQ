@@ -169,7 +169,7 @@ def frame_analysis_plot(in_buffer, EQ_out, LEM_out, target_frame, frame_idx=None
 
 
 
-def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
+def build_target_response_lin_phase(sr: int, response_type: str = "delay_only",
                            target_mag_resp: np.ndarray = None, target_mag_freqs: np.ndarray = None, 
                            fir_len: int = 1024, ROI: tuple = None, rolloff_octaves: float = 1.0,
                            device: torch.device = None):
@@ -186,15 +186,15 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
         device: Torch device for output tensor
         
     Returns:
-        desired_response: Tensor of shape (1, 1, N) representing the desired impulse response
+        target_response: Tensor of shape (1, 1, N) representing the desired impulse response
     """
     if device is None:
         device = torch.device("cpu")
     
     if response_type == "delay_only":
         # Simple Kronecker delta (no delay - add delay externally if needed)
-        desired_response = torch.zeros(1, 1, fir_len, device=device)
-        desired_response[:, :, 0] = 1.0
+        target_response = torch.zeros(1, 1, fir_len, device=device)
+        target_response[:, :, 0] = 1.0
         print(f"Desired response: delay only (1 sample)")
         
     elif response_type == "delay_and_mag":
@@ -262,13 +262,13 @@ def build_desired_response_lin_phase(sr: int, response_type: str = "delay_only",
         # Normalize filter to unity gain at passband
         h_windowed = h_windowed / h_windowed.abs().max()
         
-        desired_response = h_windowed.view(1, 1, -1)
+        target_response = h_windowed.view(1, 1, -1)
         
-        print(f"Desired response: {desired_response.shape[-1]} samples (FIR len={fir_len})")
+        print(f"Desired response: {target_response.shape[-1]} samples (FIR len={fir_len})")
     else:
         raise ValueError(f"Unknown response_type: {response_type}. Use 'delay_only' or 'delay_and_mag'")
     
-    return desired_response
+    return target_response
 
 
 
@@ -338,7 +338,7 @@ def params_to_loss(EQ_params,
             frame_len,
             hop_len,
             target_frame,
-            desired_response,
+            target_response,
             forget_factor,
             loss_fcn,
             loss_type,
@@ -383,7 +383,7 @@ def params_to_loss(EQ_params,
             H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
             H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
-            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
+            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
 
             # ROI-limited responses
             freqs_roi = freqs[roi_mask]
@@ -421,7 +421,7 @@ def process_buffers(EQ_params,
             frame_len,
             hop_len,
             target_frame,
-            desired_response,
+            target_response,
             forget_factor,
             loss_type,
             loss_fcn,
@@ -469,7 +469,7 @@ def process_buffers(EQ_params,
             H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
             H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
             est_response_buffer = H_mag_db.view(1,1,-1).detach()
-            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(desired_response.squeeze(), n=nfft)) + eps)
+            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
             LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
             LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
 
@@ -587,7 +587,7 @@ def torchmin_closure():
         frame_len,
         hop_len,
         target_frame,
-        desired_response,
+        target_response,
         forget_factor,
         loss_fcn,
         loss_type,
@@ -609,23 +609,23 @@ if __name__ == "__main__":
     audio_input_dir = base / "data" / "audio" / "input"
 
     # Input configuration
-    input_type = "metal_flute.mp3"              # Either a file or a valid synthesisable signal
+    input_type = "metal_flute.mp3"             # "white_noise" or filename in data/audio/input/
     max_audio_len_s = 15.0*16                  # None = full length
 
     # Simulation configuration
-    ROI = [100.0, 12000.0]                  # region of interest for EQ compensation (Hz)
-    frame_len = 2048*4                      # Length (samples) of processing buffers
-    hop_len = frame_len                     # Stride between frames
-    window_type = None                      # "hann" or None
-    forget_factor = 0.05                    # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-1"                      # "SGD", "Adam", "LBFGS", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4" or "Muon" TODO get newer PyTorch for Muon
-    mu_opt = 1e-3                           # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
-    loss_type = "FD-MSE"                    # "TD-MSE", "FD-MSE", "TD-SE"
-    eps_0 = 1.0                             # Irreducible error floor
-    desired_response_type = "delay_and_mag" # "delay_and_mag" or "delay_only"
-    n_rirs = 3                              # Number of RIRs to simulate (1 = constant response)
-    transition_time_s = 1.0                 # Transition duration in seconds (0 = abrupt switch)
-    debug_plot_state = None                  # Debug plot state (set to None to disable, or {} to enable)
+    ROI = [100.0, 12000.0]                      # region of interest for EQ compensation (Hz)
+    frame_len = 2048*4                          # Length (samples) of processing buffers
+    hop_len = frame_len                         # Stride between frames
+    window_type = None                          # "hann" or None
+    forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
+    optim_type = "GHAM-1"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    mu_opt = 2e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
+    eps_0 = 1.0                                 # Irreducible error floor
+    target_response_type = "delay_and_mag"     # "delay_and_mag", "delay_only"
+    n_rirs = 5                                  # Number of RIRs to simulate (1 = constant response)
+    transition_time_s = 1.0                     # Transition duration in seconds (0 = abrupt switch)
+    debug_plot_state = None                     # Debug plot state (set to None to disable, or {} to enable)
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -639,49 +639,43 @@ if __name__ == "__main__":
     # Precompute RIR tensors and transition times for time-varying scenarios
     if n_rirs > 1:
         rirs_tensors = [torch.from_numpy(rir).float().to(device) for rir in rirs]
-        # Pad all RIRs to the same length (max length)
         max_rir_len = max(rir.shape[0] for rir in rirs_tensors)
         rirs_tensors = [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in rirs_tensors]
         
         # Compute transition start/end times (in seconds)
-        # Each RIR segment stays constant until transition_center, then transitions over transition_time_s
         segment_duration_s = max_audio_len_s / n_rirs
-        transition_times_s = []  # List of (start_time, end_time) tuples for each transition
+        transition_times_s = [] 
         for i in range(1, n_rirs):
-            transition_start_s = i * segment_duration_s  # Transition STARTS at segment boundary
-            transition_end_s = transition_start_s + transition_time_s  # Transition completes after transition_time_s
+            transition_start_s = i * segment_duration_s
+            assert (i==1) or (transition_start_s >= transition_times_s[-1][-1])
+            transition_end_s = transition_start_s + transition_time_s
             transition_times_s.append((transition_start_s, min(transition_end_s, max_audio_len_s)))
 
-    # Desired response computation and initial EQ parameters
+    # Compute target response
     lem_delay = get_delay_from_ir(rir_init, sr)
     EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=6)
     target_mag_resp = EQ_comp_dict["target_response_db"]
     target_mag_freqs = EQ_comp_dict["freq_axis_smoothed"]
-    # TODO: interpolate to actual FFT bin used later (frame_len)
 
     # Initialize the LEM estimate (assume LEM is well-identified)
     LEM = torch.from_numpy(rir_init).view(1,1,-1).to(device)
-    LEM_memory = LEM.shape[-1]
 
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
-    #init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: It's pretty sensitive to initial parameters
+    #init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: sensitive to initial parameters
     #init_params_tensor = torch.zeros(1,EQ.num_params) # zeros initialization
-    # Uncomment lines below to use initial compenation EQ params as initialization
     dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
-    EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
+    EQ_memory = 128+80 # TODO: hardcoded for now (should be greater than 0)
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
-        # Generate white noise excitation
         T = int(max_audio_len_s * sr)
         input = torch.randn(T, device=device)
         print(f"Input signal: White noise ({max_audio_len_s} s, {T} samples)")
 
     else:
-        # Load audio file from data/audio/input/
         audio_path = audio_input_dir / input_type
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -689,35 +683,27 @@ if __name__ == "__main__":
         input, audio_sr = torchaudio.load(audio_path)
         input = input.to(device)
         
-        # Convert to mono if stereo (average channels)
         if input.shape[0] > 1:
-            input = input.mean(dim=0)
+            input = input.mean(dim=0) # convert to mono
         else:
             input = input.squeeze(0)
         
-        # Resample if necessary to match RIR sample rate
-        if audio_sr != sr:
+        if audio_sr != sr:  # match sample rates
             resampler = torchaudio.transforms.Resample(orig_freq=audio_sr, new_freq=sr)
             input = resampler(input)
             print(f"Resampled audio from {audio_sr} Hz to {sr} Hz")
         
-        # Truncate to max_audio_len_s if specified
         if max_audio_len_s is not None:
             max_samples = int(max_audio_len_s * sr)
             if len(input) > max_samples:
-                input = input[:max_samples]
+                input = input[:max_samples]     # trunctae to max length
                 print(f"Truncated audio to first {max_audio_len_s} seconds")
-        
+
         T = len(input)
         T_seconds = T / sr
         print(f"Input signal: {input_type} ({T_seconds:.2f} s, {T} samples)")
-
-    # Normalize input signal and adapt tensor shape
-    input = input / input.abs().max()
+    input = input / input.abs().max()   # normalization
     input = input.view(1,1,-1).to(device)
-
-    # Allocate results buffers
-    y_control = torch.zeros(1,1,T, device=device)
 
     # Hanning window for overlap-add (use 50% overlap for perfect reconstruction)
     match window_type:
@@ -733,18 +719,13 @@ if __name__ == "__main__":
     # Set optimization (adaptive filtering)
     match optim_type:
         case "SGD":
-            mu = mu_opt # TODO: check step size normalization carefully!
-            optimizer = torch.optim.SGD([EQ_params], lr=mu)
+            optimizer = torch.optim.SGD([EQ_params], lr=mu_opt)
         case "Adam":
-            mu = mu_opt / frame_len # TODO: check step size normalization carefully!
-            optimizer = torch.optim.Adam([EQ_params], lr=mu)
+            optimizer = torch.optim.Adam([EQ_params], lr=mu_opt)
         case "Muon":
             raise ValueError("Muon optimizer requires newer PyTorch version.")
-            mu = mu_opt / frame_len # TODO: check step size normalization carefully!
             optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
-            mu = mu_opt # TODO: check step size normalization carefully!
-            optimizer = None # No optimizer object needed yet! TODO
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
@@ -753,9 +734,6 @@ if __name__ == "__main__":
                 case "TD-SE" | "FD-SE":
                     jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
         case "Newton" | "GHAM-3" | "GHAM-4":
-            mu = mu_opt
-            optimizer = torchmin.Minimizer([EQ_params], method='newton-exact', options={'lr': mu})
-            closure = torchmin_closure
             alpha_ridge = 1e-3
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
@@ -771,9 +749,9 @@ if __name__ == "__main__":
 
     # Build desired response: delay + optional target magnitude response
     total_delay = lem_delay + 7  # TODO: add EQ group delay if necessary. Hardcoded for now!
-    desired_response = build_desired_response_lin_phase(
+    target_response = build_target_response_lin_phase(
         sr=sr,
-        response_type=desired_response_type,
+        response_type=target_response_type,
         target_mag_resp=target_mag_resp,
         target_mag_freqs=target_mag_freqs,
         fir_len=1024,
@@ -783,15 +761,15 @@ if __name__ == "__main__":
     )
     
     # Convert linear-phase desired response to minimum phase (minimize group delay) and add desired delay
-    h_linear_np = desired_response.squeeze().cpu().numpy()
+    h_linear_np = target_response.squeeze().cpu().numpy()
     h_minphase_np = minimum_phase(h_linear_np, method='homomorphic', half=False)
     delay_zeros = torch.zeros(total_delay, device=device)
     h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
-    desired_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
+    target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
 
     # Precompute desired output
-    desired_output = torchaudio.functional.fftconvolve(input, desired_response, mode="full")
-    print(f"Precomputed desired output (type: {desired_response_type})")
+    desired_output = torchaudio.functional.fftconvolve(input, target_response, mode="full")
+    print(f"Precomputed desired output (type: {target_response_type})")
     
     # Initialize loss & loss history
     match loss_type:
@@ -809,16 +787,21 @@ if __name__ == "__main__":
     irreducible_loss_history = []
 
     # Initialize buffers
-    in_buffer = torch.zeros(1,1,frame_len, device=device)
+    y_control = torch.zeros(1,1,T, device=device)                       # output audio allocation
+    in_buffer = torch.zeros(1,1,frame_len, device=device)               # input audio buffer
     EQ_out_len = next_power_of_2(2*frame_len - 1) # match dasp_pytorch sosfilt_via_fms implementation
-    EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)
-    LEM_out_len = frame_len + LEM_memory - 1
-    LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)
-    est_response_buffer = torch.zeros(1,1,frame_len, device=device)
-    EQ_params_buffer = EQ_params.clone().detach()
-    rir_idx = 0
+    EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)          # buffer for EQ output (input to LEM)
+    LEM_out_len = frame_len + LEM.shape[-1] - 1
+    LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)        # buffer for soundsystem output
+    est_response_buffer = torch.zeros(1,1,frame_len, device=device)     # buffer for estimated soundsystem response
+    EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
+    rir_idx = 0                                                         # response index (adaptive scenarios)
     
-    # Main loop
+
+    #####################
+    ##### Main loop #####
+    #####################
+
     n_frames = (T - frame_len) // hop_len + 1
     for k in tqdm(range(n_frames), desc="Processing", unit="frame"):
 
@@ -852,7 +835,6 @@ if __name__ == "__main__":
                 prev_rir = rirs_tensors[current_rir_idx - 1]
                 curr_rir = rirs_tensors[current_rir_idx]
                 LEM = interpolate_IRs(alpha, prev_rir, curr_rir)
-                #LEM = ((1 - alpha) * prev_rir + alpha * curr_rir).view(1, 1, -1)
             else:
                 LEM = rirs_tensors[current_rir_idx].view(1, 1, -1)
         
@@ -872,7 +854,7 @@ if __name__ == "__main__":
             frame_len,
             hop_len,
             target_frame,
-            desired_response,
+            target_response,
             forget_factor,
             loss_type,
             loss_fcn,
@@ -894,7 +876,7 @@ if __name__ == "__main__":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -909,13 +891,13 @@ if __name__ == "__main__":
                     #ridge_regressor.fit(jac,b)
                     #update_ridge = ridge_regressor.w      # (num_params, 1)
                     if optim_type == "GHAM-1":
-                        EQ_params -= mu * update.view_as(EQ_params)
+                        EQ_params -= mu_opt * update.view_as(EQ_params)
                     elif optim_type == "GHAM-2":
-                        EQ_params -= mu*(2-mu) * update.view_as(EQ_params)
+                        EQ_params -= mu_opt*(mu_opt) * update.view_as(EQ_params)
                 EQ_params.grad = None
             case "Newton":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # Log Hessian condition number
                 hess_cond_history.append(torch.linalg.cond(hess.detach().cpu().float()).item())
@@ -925,11 +907,11 @@ if __name__ == "__main__":
                     #update = lstsq(hess, jac).solution        # (num_params, 1)
                     ridge_regressor.fit(hess,jac)
                     update_ridge = ridge_regressor.w           # (num_params, 1)
-                    EQ_params -= mu * update_ridge.view_as(EQ_params)
+                    EQ_params -= mu_opt * update_ridge.view_as(EQ_params)
 
             case "GHAM-3" | "GHAM-4":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI)
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI)
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -940,15 +922,15 @@ if __name__ == "__main__":
                 jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
 
                 with torch.no_grad():
-                    theta_1 = -mu * lstsq(jac, loss_val).solution
-                    theta_2 = (1-mu)*theta_1
-                    residual_3 = -mu * theta_1.T@hess@theta_1 + jac@theta_2
+                    theta_1 = -mu_opt * lstsq(jac, loss_val).solution
+                    theta_2 = (1-mu_opt)*theta_1
+                    residual_3 = -mu_opt * theta_1.T@hess@theta_1 + jac@theta_2
                     theta_3 = theta_2 + lstsq(jac,residual_3).solution
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
-                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,desired_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
-                        residual_4 = -mu * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
+                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
                         theta_4 = theta_3 + lstsq(jac,residual_4).solution
                         correction = theta_1 + theta_2 + theta_3 + theta_4
                     EQ_params += correction.view_as(EQ_params)
