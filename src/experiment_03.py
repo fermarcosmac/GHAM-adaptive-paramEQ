@@ -126,6 +126,51 @@ def interpolate_IRs(alpha, prev_rir: torch.Tensor, curr_rir: torch.Tensor) -> to
 
 
 
+def update_LEM(current_time_s, n_rirs, transition_times_s, rirs_tensors):
+    """Update LEM based on current time and transition schedule.
+    
+    Args:
+        current_time_s: Current time in seconds
+        n_rirs: Number of RIRs
+        transition_times_s: List of (start_time, end_time) tuples for each transition
+        rirs_tensors: List of RIR tensors
+    
+    Returns:
+        LEM: Updated LEM tensor of shape (1, 1, -1)
+    """
+    if n_rirs <= 1:
+        return rirs_tensors[0].view(1, 1, -1)
+    
+    # Find which RIR segment we're in and compute interpolation
+    current_rir_idx = 0
+    in_transition = False
+    alpha = 0.0  # interpolation factor (0 = previous RIR, 1 = current RIR)
+    
+    for i, (t_start, t_end) in enumerate(transition_times_s):
+        if current_time_s >= t_end:
+            # Past this transition entirely - use the new RIR
+            current_rir_idx = i + 1
+            in_transition = False
+        elif current_time_s >= t_start:
+            # In the middle of this transition
+            current_rir_idx = i + 1
+            in_transition = True
+            if t_end > t_start:  # smooth transition
+                alpha = (current_time_s - t_start) / (t_end - t_start)
+            else:  # abrupt (t_start == t_end)
+                alpha = 1.0  # instant jump to new RIR
+            break
+    
+    # Interpolate between RIRs if in transition
+    if in_transition and current_rir_idx > 0:
+        prev_rir = rirs_tensors[current_rir_idx - 1]
+        curr_rir = rirs_tensors[current_rir_idx]
+        return interpolate_IRs(alpha, prev_rir, curr_rir)
+    else:
+        return rirs_tensors[current_rir_idx].view(1, 1, -1)
+
+
+
 def frame_analysis_plot(in_buffer, EQ_out, LEM_out, target_frame, frame_idx=None):
     """Plot 4 signals in a 4x1 subplot grid for frame-by-frame analysis.
     
@@ -618,7 +663,7 @@ if __name__ == "__main__":
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-1"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    optim_type = "SGD"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
     mu_opt = 2e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
     eps_0 = 1.0                                 # Irreducible error floor
@@ -810,33 +855,7 @@ if __name__ == "__main__":
 
         # Update LEM based on current time and transition schedule
         if n_rirs > 1:
-            # Find which RIR segment we're in and compute interpolation
-            current_rir_idx = 0
-            in_transition = False
-            alpha = 0.0  # interpolation factor (0 = previous RIR, 1 = current RIR)
-            
-            for i, (t_start, t_end) in enumerate(transition_times_s):
-                if current_time_s >= t_end:
-                    # Past this transition entirely - use the new RIR
-                    current_rir_idx = i + 1
-                    in_transition = False
-                elif current_time_s >= t_start:
-                    # In the middle of this transition
-                    current_rir_idx = i + 1
-                    in_transition = True
-                    if t_end > t_start:  # smooth transition
-                        alpha = (current_time_s - t_start) / (t_end - t_start)
-                    else:  # abrupt (t_start == t_end)
-                        alpha = 1.0  # instant jump to new RIR
-                    break
-            
-            # Interpolate between RIRs if in transition
-            if in_transition and current_rir_idx > 0:
-                prev_rir = rirs_tensors[current_rir_idx - 1]
-                curr_rir = rirs_tensors[current_rir_idx]
-                LEM = interpolate_IRs(alpha, prev_rir, curr_rir)
-            else:
-                LEM = rirs_tensors[current_rir_idx].view(1, 1, -1)
+            LEM = update_LEM(current_time_s, n_rirs, transition_times_s, rirs_tensors)
         
         # Update input buffer and apply window
         in_buffer = input[:,:,start_idx:start_idx+frame_len] * window
