@@ -717,7 +717,7 @@ def process_buffers(EQ_params,
     else:
         h_est = h_est_full[..., :Lh]
     LEM_est_buffer = h_est.view(1, 1, -1).detach()
-    LEM_est_buffer = LEM # Sanity check: suppose LEM is perfectly known!
+    #LEM_est_buffer = LEM # Sanity check: suppose LEM is perfectly known!
 
     buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer, complex_est_response_buffer, LEM_est_buffer, validation_error)
 
