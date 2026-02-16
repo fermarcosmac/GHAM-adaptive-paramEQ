@@ -15,7 +15,7 @@ import torchaudio
 root = Path(__file__).resolve().parent.parent  # src -> repo root
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
-from local_dasp_pytorch.modules import ParametricEQ
+from lib.local_dasp_pytorch.modules import ParametricEQ
 from modules import EQController_dasp, EQLogger
 
 
