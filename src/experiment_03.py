@@ -373,11 +373,72 @@ def interp_to_log_freq(mag_db, freqs_lin, n_points=None, f_min=None, f_max=None)
 
 
 
+class LEMConv(torch.autograd.Function):
+    """
+    Custom LEM convolution:
+    - forward: uses true LEM impulse response (h_true)
+    - backward: uses estimated LEM impulse response (h_est) via FFT-based convolution
+    """
+
+    @staticmethod
+    def forward(ctx, x, h_true, h_est):
+        """Forward pass using true LEM impulse response.
+
+        Args:
+            x:      (B, 1, N) input signal segment
+            h_true: (1, 1, M) true LEM IR (no grad)
+            h_est:  (1, 1, M) estimated LEM IR used only for gradients
+        """
+        B, C, N = x.shape
+        _, _, M = h_true.shape
+        L = N + M - 1
+        nfft = L
+
+        X = torch.fft.rfft(x, n=nfft)
+        H_true = torch.fft.rfft(h_true, n=nfft)
+        Y = X * H_true
+
+        y_full = torch.fft.irfft(Y, n=nfft)
+        y = y_full[..., :L]
+
+        ctx.save_for_backward(h_est,h_true)
+        ctx.input_len = N
+        ctx.kernel_len = M
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Backward pass using estimated LEM impulse response via FFT-based convolution."""
+        (h_est,h_true,) = ctx.saved_tensors
+        #h_est = h_true.detach() # Sanity check! SUppose estimated response is perfect!
+        N = ctx.input_len
+        M = ctx.kernel_len
+
+        B, C, L = grad_output.shape
+
+        h_est_rev = torch.flip(h_est, dims=(-1,))
+        #h_est_rev = h_est # Sanity check!
+
+        L_full = L + M - 1
+        nfft = L_full
+
+        G = torch.fft.rfft(grad_output, n=nfft)
+        H_rev = torch.fft.rfft(h_est_rev, n=nfft)
+        grad_full = torch.fft.irfft(G * H_rev, n=nfft)[..., :L_full]
+
+        grad_x = grad_full[..., :N]
+
+        return grad_x, None, None
+
+
+
 def params_to_loss(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
             est_response_buffer,
+            complex_est_response_buffer,
+            LEM_est_buffer,
             EQ,
             LEM,
             frame_len,
@@ -396,39 +457,47 @@ def params_to_loss(EQ_params,
     EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     EQ_out_buffer += EQ_out
 
-    # Process through LEM
-    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    # Process through LEM: true LEM in forward, estimated LEM in gradients
+    LEM_out = LEMConv.apply(
+        EQ_out_buffer[:, :, :frame_len],
+        LEM.view(1, 1, -1),
+        LEM_est_buffer
+    )
     
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
     
+    # Deconvolve actual response (complex H), shared by FD and TD losses
+    nfft = 2 * frame_len - 1
+    freqs = torch.fft.rfftfreq(nfft, d=1.0 / sr, device=LEM_out_buffer.device)
+    Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(), n=nfft)
+    X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)
+    eps = 1e-6
+    H_current = (Y * X.conj_physical()) / (X * X.conj_physical() + eps)  # full complex transfer function (no ROI masking)
+
+    # Complex-domain exponential smoothing of H (update always, regardless of loss type)
+    if torch.sum(torch.abs(est_response_buffer)) == 0:
+        forget_factor = 1.0
+    else:
+        forget_factor = forget_factor
+    H = (forget_factor) * H_current + (1 - forget_factor) * complex_est_response_buffer.squeeze()
+    complex_est_response_buffer = H.view(1, 1, -1).detach()
+
     # Use LEM output to compute loss and update EQ parameters
     match loss_type:
         case "FD-MSE" | "FD-SE":
 
-            # # Deconvolve actual response within ROI limits
-            nfft = 2*frame_len-1
-            freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
-            Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
-            X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
-            eps = 1e-8
-            H = Y / (X + eps)
+            # Apply ROI mask only for FD loss computation
             if ROI is not None:
                 roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
-                # Set H_complex to 1 (no amplification) outside ROI
                 H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
             else:
                 roi_mask = torch.ones_like(H, dtype=torch.bool)
-            
-            if torch.sum(torch.abs(est_response_buffer)) == 0:
-                forget_factor = 1.0
-            else:
-                forget_factor = forget_factor
-            H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
-            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
-            est_response_buffer = H_mag_db.view(1,1,-1).detach()
-            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+            H_mag_db_current = 20 * torch.log10(torch.abs(H) + eps)
+            H_mag_db = (forget_factor) * H_mag_db_current + (1 - forget_factor) * est_response_buffer.squeeze()
+            est_response_buffer = H_mag_db.view(1, 1, -1).detach()
+            desired_mag_db = 20 * torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
 
             # ROI-limited responses
             freqs_roi = freqs[roi_mask]
@@ -463,6 +532,8 @@ def process_buffers(EQ_params,
             est_response_buffer,
             EQ,
             LEM,
+            complex_est_response_buffer,
+            LEM_est_buffer,
             frame_len,
             hop_len,
             target_frame,
@@ -480,41 +551,52 @@ def process_buffers(EQ_params,
     EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     EQ_out_buffer += EQ_out
 
-    # Process through LEM
-    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    # Process through LEM: true LEM in forward, estimated LEM in gradients
+    LEM_out = LEMConv.apply(
+        EQ_out_buffer[:, :, :frame_len],
+        LEM.view(1, 1, -1),
+        LEM_est_buffer
+    )
     
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
 
+    # Deconvolve actual response (complex H), shared by FD and TD losses
+    nfft = 2 * frame_len - 1
+    freqs = torch.fft.rfftfreq(nfft, d=1.0 / sr, device=LEM_out_buffer.device)
+    Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(), n=nfft)
+    X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)
+
+    # Frequency-dependent regularization epsilon for deconvolution:
+    # small inside ROI, gradually increasing outside to avoid ill-conditioned inversion
+    eps = 1e-6
+    H_current = (Y * X.conj_physical()) / (X * X.conj_physical() + eps)  # full complex transfer function (no ROI masking)
+
+    # Complex-domain exponential smoothing of H (update always, regardless of loss type)
+    if torch.sum(torch.abs(est_response_buffer)) == 0:
+        forget_factor = 1.0
+    else:
+        forget_factor = forget_factor
+    H = (forget_factor) * H_current + (1 - forget_factor) * complex_est_response_buffer.squeeze()
+    complex_est_response_buffer = H.view(1, 1, -1).detach()
+
     # Use LEM output to compute loss and update EQ parameters
     match loss_type:
         case "FD-MSE" | "FD-SE":
 
-            # # Deconvolve actual response within ROI limits
-            nfft = 2*frame_len-1
-            freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
-            Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
-            X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
-            eps = 1e-8
-            H = Y / (X + eps)
+            # Apply ROI mask only for FD loss computation
             if ROI is not None:
                 roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
-                # Set H_complex to 1 (no amplification) outside ROI
                 H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
             else:
                 roi_mask = torch.ones_like(H, dtype=torch.bool)
-            
-            if torch.sum(torch.abs(est_response_buffer)) == 0:
-                forget_factor = 1.0
-            else:
-                forget_factor = forget_factor
 
             # Compute magnitude responses
-            H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
-            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
-            est_response_buffer = H_mag_db.view(1,1,-1).detach()
-            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+            H_mag_db_current = 20 * torch.log10(torch.abs(H) + eps)
+            H_mag_db = (forget_factor) * H_mag_db_current + (1 - forget_factor) * est_response_buffer.squeeze()
+            est_response_buffer = H_mag_db.view(1, 1, -1).detach()
+            desired_mag_db = 20 * torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
             LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
             LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
 
@@ -550,6 +632,16 @@ def process_buffers(EQ_params,
             validation_error = MAE(H_mag_db_log_smoothed, desired_mag_db_log_smoothed) / MAE(LEM_mag_db_log_smoothed, desired_mag_db_log_smoothed)
 
             if debug_plot_state is not None:
+                # Time-domain estimated response (from complex H) and true LEM for debugging
+                h_est_full_plot = torch.fft.irfft(H, n=nfft)
+                Lh = LEM.shape[-1]
+                if h_est_full_plot.shape[-1] < Lh:
+                    pad = Lh - h_est_full_plot.shape[-1]
+                    h_est_td = F.pad(h_est_full_plot, (0, pad))[:Lh]
+                else:
+                    h_est_td = h_est_full_plot[..., :Lh]
+                lem_td = LEM.squeeze()[..., :Lh]
+
                 # Convert to numpy for plotting (use log-frequency data)
                 freqs_log_np = freqs_log.detach().cpu().numpy()
                 H_mag_db_log_np = H_mag_db_log.detach().cpu().numpy()
@@ -557,31 +649,50 @@ def process_buffers(EQ_params,
                 LEM_mag_db_log_np = LEM_mag_db_log.detach().cpu().numpy()
                 LEM_mag_db_log_smoothed_np = LEM_mag_db_log_smoothed.detach().cpu().numpy()
                 desired_mag_db_log_np = desired_mag_db_log.detach().cpu().numpy()
+                h_est_td_np = h_est_td.detach().cpu().numpy()
+                lem_td_np = lem_td.detach().cpu().numpy()
                 
                 # Initialize plot on first call
                 if debug_plot_state.get('fig') is None:
                     plt.ion()  # Enable interactive mode
-                    fig, ax = plt.subplots(figsize=(12, 6))
-                    line_raw, = ax.plot(freqs_log_np, H_mag_db_log_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
-                    line_smooth, = ax.plot(freqs_log_np, H_mag_db_log_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
-                    line_desired, = ax.plot(freqs_log_np, desired_mag_db_log_np, linewidth=1, label='Desired H(f)', color='tab:orange')
-                    line_lem_raw, = ax.plot(freqs_log_np, LEM_mag_db_log_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
-                    line_lem_smooth, = ax.plot(freqs_log_np, LEM_mag_db_log_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
-                    ax.set_xlabel("Frequency (Hz)")
-                    ax.set_ylabel("Magnitude (dB)")
-                    ax.set_xscale('log')
-                    ax.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM (log-freq smoothing)")
-                    ax.legend(loc='lower left')
-                    ax.grid(True, alpha=0.3)
-                    ax.set_ylim(-40, 30)  # Extended y-axis range for LEM
+                    fig, (ax_mag, ax_time) = plt.subplots(2, 1, figsize=(12, 8))
+
+                    # Magnitude response subplot
+                    line_raw, = ax_mag.plot(freqs_log_np, H_mag_db_log_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
+                    line_smooth, = ax_mag.plot(freqs_log_np, H_mag_db_log_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
+                    line_desired, = ax_mag.plot(freqs_log_np, desired_mag_db_log_np, linewidth=1, label='Desired H(f)', color='tab:orange')
+                    line_lem_raw, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
+                    line_lem_smooth, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
+                    ax_mag.set_xlabel("Frequency (Hz)")
+                    ax_mag.set_ylabel("Magnitude (dB)")
+                    ax_mag.set_xscale('log')
+                    ax_mag.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM (log-freq smoothing)")
+                    ax_mag.legend(loc='lower left')
+                    ax_mag.grid(True, alpha=0.3)
+                    ax_mag.set_ylim(-40, 30)  # Extended y-axis range for LEM
+
+                    # Time-domain IR subplot
+                    t_ir = np.arange(Lh)
+                    line_est_time, = ax_time.plot(t_ir, h_est_td_np, linewidth=1.0, label='Estimated h(t)', color='tab:red')
+                    line_true_time, = ax_time.plot(t_ir, lem_td_np, linewidth=1.0, label='True LEM h(t)', color='tab:gray', alpha=0.7)
+                    ax_time.set_xlabel("Sample")
+                    ax_time.set_ylabel("Amplitude")
+                    ax_time.set_title("Time-domain LEM: Estimated vs True")
+                    ax_time.legend(loc='upper right')
+                    ax_time.grid(True, alpha=0.3)
+
                     plt.tight_layout()
                     debug_plot_state['fig'] = fig
-                    debug_plot_state['ax'] = ax
+                    debug_plot_state['ax'] = ax_mag
+                    debug_plot_state['ax_mag'] = ax_mag
+                    debug_plot_state['ax_time'] = ax_time
                     debug_plot_state['line_raw'] = line_raw
                     debug_plot_state['line_smooth'] = line_smooth
                     debug_plot_state['line_desired'] = line_desired
                     debug_plot_state['line_lem_raw'] = line_lem_raw
                     debug_plot_state['line_lem_smooth'] = line_lem_smooth
+                    debug_plot_state['line_est_time'] = line_est_time
+                    debug_plot_state['line_true_time'] = line_true_time
                 else:
                     # Update existing lines
                     debug_plot_state['line_raw'].set_ydata(H_mag_db_log_np)
@@ -589,13 +700,26 @@ def process_buffers(EQ_params,
                     debug_plot_state['line_desired'].set_ydata(desired_mag_db_log_np)
                     debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_log_np)
                     debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_log_smoothed_np)
+                    debug_plot_state['line_est_time'].set_ydata(h_est_td_np)
+                    debug_plot_state['line_true_time'].set_ydata(lem_td_np)
                 debug_plot_state['fig'].canvas.draw()
                 debug_plot_state['fig'].canvas.flush_events()
             
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
 
-    buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer, validation_error)
+    # Update estimated LEM time-domain buffer from complex H buffer
+    h_est_full = torch.fft.irfft(H, n=nfft)
+    Lh = LEM.shape[-1]
+    if h_est_full.shape[-1] < Lh:
+        pad = Lh - h_est_full.shape[-1]
+        h_est = F.pad(h_est_full, (0, pad))
+    else:
+        h_est = h_est_full[..., :Lh]
+    LEM_est_buffer = h_est.view(1, 1, -1).detach()
+    LEM_est_buffer = LEM # Sanity check: suppose LEM is perfectly known!
+
+    buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer, complex_est_response_buffer, LEM_est_buffer, validation_error)
 
     return loss, buffers
 
@@ -620,6 +744,8 @@ def torchmin_closure():
     EQ_out_buffer_local = EQ_out_buffer.clone()
     LEM_out_buffer_local = LEM_out_buffer.clone()
     est_response_buffer_local = est_response_buffer.clone()
+    complex_est_response_buffer_local = complex_est_response_buffer.clone()
+    LEM_est_buffer_local = LEM_est_buffer.clone()
 
     loss = params_to_loss(
         EQ_params,
@@ -627,6 +753,8 @@ def torchmin_closure():
         EQ_out_buffer_local,     # pass clones
         LEM_out_buffer_local,    # pass clones
         est_response_buffer_local,
+        complex_est_response_buffer_local,
+        LEM_est_buffer_local,
         EQ,
         LEM,
         frame_len,
@@ -663,11 +791,11 @@ if __name__ == "__main__":
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "SGD"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    optim_type = "SGD"                          # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
     mu_opt = 2e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
     eps_0 = 1.0                                 # Irreducible error floor
-    target_response_type = "delay_and_mag"     # "delay_and_mag", "delay_only"
+    target_response_type = "delay_and_mag"      # "delay_and_mag", "delay_only"
     n_rirs = 5                                  # Number of RIRs to simulate (1 = constant response)
     transition_time_s = 1.0                     # Transition duration in seconds (0 = abrupt switch)
     debug_plot_state = None                     # Debug plot state (set to None to disable, or {} to enable)
@@ -838,8 +966,10 @@ if __name__ == "__main__":
     EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)          # buffer for EQ output (input to LEM)
     LEM_out_len = frame_len + LEM.shape[-1] - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)        # buffer for soundsystem output
-    est_response_buffer = torch.zeros(1,1,frame_len, device=device)     # buffer for estimated soundsystem response
+    est_response_buffer = torch.zeros(1,1,frame_len, device=device)     # buffer for estimated soundsystem magnitude response
+    complex_est_response_buffer = torch.zeros(1,1,frame_len, dtype=torch.cfloat, device=device)  # buffer for estimated complex soundsystem response
     EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
+    LEM_est_buffer = LEM.clone().detach()                               # buffer for estimated LEM impulse response (used for derivative computation)
     rir_idx = 0                                                         # response index (adaptive scenarios)
     
 
@@ -863,13 +993,16 @@ if __name__ == "__main__":
         # Get target frame
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
 
-        loss, buffers = process_buffers(EQ_params,
+        loss, buffers = process_buffers(
+            EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
             est_response_buffer,
             EQ,
             LEM,
+            complex_est_response_buffer,
+            LEM_est_buffer,
             frame_len,
             hop_len,
             target_frame,
@@ -879,8 +1012,9 @@ if __name__ == "__main__":
             loss_fcn,
             sr=sr,
             ROI=ROI,
-            debug_plot_state=debug_plot_state)
-        EQ_out_buffer, LEM_out_buffer, est_response_buffer, validation_error = buffers
+            debug_plot_state=debug_plot_state
+        )
+        EQ_out_buffer, LEM_out_buffer, est_response_buffer, complex_est_response_buffer, LEM_est_buffer, validation_error = buffers
 
         loss_history.append(torch.mean(loss).item())
         validation_error_history.append(validation_error.item())
@@ -895,7 +1029,7 @@ if __name__ == "__main__":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,complex_est_response_buffer,LEM_est_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -915,8 +1049,8 @@ if __name__ == "__main__":
                         EQ_params -= mu_opt*(mu_opt) * update.view_as(EQ_params)
                 EQ_params.grad = None
             case "Newton":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,complex_est_response_buffer,LEM_est_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,complex_est_response_buffer,LEM_est_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # Log Hessian condition number
                 hess_cond_history.append(torch.linalg.cond(hess.detach().cpu().float()).item())
@@ -929,8 +1063,8 @@ if __name__ == "__main__":
                     EQ_params -= mu_opt * update_ridge.view_as(EQ_params)
 
             case "GHAM-3" | "GHAM-4":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI)
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,complex_est_response_buffer,LEM_est_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI)
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,complex_est_response_buffer,LEM_est_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -948,7 +1082,7 @@ if __name__ == "__main__":
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
-                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,complex_est_response_buffer,LEM_est_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                         residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
                         theta_4 = theta_3 + lstsq(jac,residual_4).solution
                         correction = theta_1 + theta_2 + theta_3 + theta_4
@@ -964,6 +1098,7 @@ if __name__ == "__main__":
             EQ_out_buffer = EQ_out_buffer.detach() # prevent graph accumulation across iterations
             LEM_out_buffer = LEM_out_buffer.detach()
             est_response_buffer = est_response_buffer.detach()
+            complex_est_response_buffer = complex_est_response_buffer.detach()
 
         # Store output frame (only store hop_len new samples to handle overlap-add)
         end_idx = min(start_idx + frame_len, T)
