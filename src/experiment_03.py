@@ -392,7 +392,8 @@ class LEMConv(torch.autograd.Function):
         y = torchaudio.functional.fftconvolve(x, h_true, mode="full")
         ctx.save_for_backward(h_est)
         ctx.input_len = x.shape[-1]
-        ctx.LEM_len = h_true.shape[-1]
+        #ctx.LEM_len = h_true.shape[-1]
+        ctx.h_est_len = h_est.shape[-1]
         return y
 
     @staticmethod
@@ -400,10 +401,9 @@ class LEMConv(torch.autograd.Function):
         """Backward pass using estimated LEM impulse response via FFT-based convolution."""
         (h_est,) = ctx.saved_tensors
         N = ctx.input_len
-        M = ctx.LEM_len
+        M = ctx.h_est_len
 
         grad_full = torchaudio.functional.fftconvolve(grad_output, torch.flip(h_est, dims=[-1]), mode="full")
-
         grad_x = grad_full[..., M-1:M-1+N]
 
         return grad_x, None, None
@@ -415,7 +415,8 @@ def params_to_loss(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
-            est_response_buffer,
+            est_mag_response_buffer,
+            est_cpx_response_buffer,
             EQ,
             LEM,
             frame_len,
@@ -436,42 +437,44 @@ def params_to_loss(EQ_params,
 
     # Process through LEM
     #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-    LEM_est_buffer = LEM.view(1, 1, -1).detach() # True response for backward pass for now
+    LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+    #LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass for now
     LEM_out = LEMConv.apply(
         EQ_out_buffer[:, :, :frame_len],
         LEM.view(1, 1, -1),
-        LEM_est_buffer
+        LEM_est
     )
 
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
+
+    # # Deconvolve actual response within ROI limits
+    nfft = 2*frame_len-1
+    freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
+    Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
+    X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
+    eps = 1e-8
+    H = Y / (X + eps)
+    if ROI is not None:
+        roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
+        # Set H_complex to 1 (no amplification) outside ROI
+        H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
+    else:
+        roi_mask = torch.ones_like(H, dtype=torch.bool)
+    
+    if torch.sum(torch.abs(est_mag_response_buffer)) == 0:
+        forget_factor = 1.0
+    else:
+        forget_factor = forget_factor
     
     # Use LEM output to compute loss and update EQ parameters
     match loss_type:
         case "FD-MSE" | "FD-SE":
 
-            # # Deconvolve actual response within ROI limits
-            nfft = 2*frame_len-1
-            freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
-            Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
-            X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
-            eps = 1e-8
-            H = Y / (X + eps)
-            if ROI is not None:
-                roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
-                # Set H_complex to 1 (no amplification) outside ROI
-                H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
-            else:
-                roi_mask = torch.ones_like(H, dtype=torch.bool)
-            
-            if torch.sum(torch.abs(est_response_buffer)) == 0:
-                forget_factor = 1.0
-            else:
-                forget_factor = forget_factor
             H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
-            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
-            est_response_buffer = H_mag_db.view(1,1,-1).detach()
+            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_mag_response_buffer.squeeze()
+            est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
 
             # ROI-limited responses
@@ -504,7 +507,8 @@ def process_buffers(EQ_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
-            est_response_buffer,
+            est_mag_response_buffer,
+            est_cpx_response_buffer,
             EQ,
             LEM,
             frame_len,
@@ -526,44 +530,48 @@ def process_buffers(EQ_params,
 
     # Process through LEM
     #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-    LEM_est_buffer = LEM.view(1, 1, -1).detach() # True response for backward pass for now
+    # TODO: IFFT complex response buffer to get LEM_est
+    LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach() # Estimated LEM response for backward pass
+    #LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass for now
     LEM_out = LEMConv.apply(
         EQ_out_buffer[:, :, :frame_len],
         LEM.view(1, 1, -1),
-        LEM_est_buffer
+        LEM_est
     )
 
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
 
+    # Deconvolve actual response within ROI limits
+    nfft = 2*frame_len-1
+    freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
+    Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)       # Complex spectrum
+    X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)                             # Complex spectrum
+    eps = 1e-8
+    H = Y / (X + eps) # TODO: Kirkeby deconvolve
+    if ROI is not None:
+        roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
+        # Set H_complex to 1 (no amplification) outside ROI
+        H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
+    else:
+        roi_mask = torch.ones_like(H, dtype=torch.bool)
+    
+    if torch.sum(torch.abs(est_mag_response_buffer)) == 0:
+        forget_factor = 1.0
+    else:
+        forget_factor = forget_factor
+    # TODO: Update buffered complex response
+    est_cpx_response_buffer = (1-forget_factor)*est_cpx_response_buffer + forget_factor*H.view(1,1,-1).detach()
+
     # Use LEM output to compute loss and update EQ parameters
     match loss_type:
         case "FD-MSE" | "FD-SE":
 
-            # # Deconvolve actual response within ROI limits
-            nfft = 2*frame_len-1
-            freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
-            Y = torch.fft.rfft(LEM_out_buffer[:, :, :frame_len].squeeze(),n=nfft)      # Complex spectrum
-            X = torch.fft.rfft(in_buffer.squeeze(), n=nfft)  # Complex spectrum
-            eps = 1e-8
-            H = Y / (X + eps)
-            if ROI is not None:
-                roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
-                # Set H_complex to 1 (no amplification) outside ROI
-                H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
-            else:
-                roi_mask = torch.ones_like(H, dtype=torch.bool)
-            
-            if torch.sum(torch.abs(est_response_buffer)) == 0:
-                forget_factor = 1.0
-            else:
-                forget_factor = forget_factor
-
             # Compute magnitude responses
             H_mag_db_current = 20*torch.log10(torch.abs(H) + eps)
-            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_response_buffer.squeeze()
-            est_response_buffer = H_mag_db.view(1,1,-1).detach()
+            H_mag_db = (forget_factor)*H_mag_db_current + (1-forget_factor)*est_mag_response_buffer.squeeze()
+            est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
             desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
             LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
             LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
@@ -644,8 +652,9 @@ def process_buffers(EQ_params,
             
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
+            # TODO: compute validation error for TD loss as well
 
-    buffers = (EQ_out_buffer, LEM_out_buffer, est_response_buffer, validation_error)
+    buffers = (EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error)
 
     return loss, buffers
 
@@ -669,14 +678,14 @@ def torchmin_closure():
 
     EQ_out_buffer_local = EQ_out_buffer.clone()
     LEM_out_buffer_local = LEM_out_buffer.clone()
-    est_response_buffer_local = est_response_buffer.clone()
+    est_mag_response_buffer_local = est_mag_response_buffer.clone()
 
     loss = params_to_loss(
         EQ_params,
         in_buffer,
         EQ_out_buffer_local,     # pass clones
         LEM_out_buffer_local,    # pass clones
-        est_response_buffer_local,
+        est_mag_response_buffer_local,
         EQ,
         LEM,
         frame_len,
@@ -888,7 +897,8 @@ if __name__ == "__main__":
     EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)          # buffer for EQ output (input to LEM)
     LEM_out_len = frame_len + LEM.shape[-1] - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)        # buffer for soundsystem output
-    est_response_buffer = torch.zeros(1,1,frame_len, device=device)     # buffer for estimated soundsystem response
+    est_mag_response_buffer = torch.zeros(1,1,frame_len, device=device)     # buffer for estimated soundsystem response
+    est_cpx_response_buffer = torch.zeros(1,1,frame_len, device=device)     # buffer for estimated complex soundsystem response
     EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
     rir_idx = 0                                                         # response index (adaptive scenarios)
     
@@ -917,7 +927,8 @@ if __name__ == "__main__":
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
-            est_response_buffer,
+            est_mag_response_buffer,
+            est_cpx_response_buffer,
             EQ,
             LEM,
             frame_len,
@@ -930,7 +941,7 @@ if __name__ == "__main__":
             sr=sr,
             ROI=ROI,
             debug_plot_state=debug_plot_state)
-        EQ_out_buffer, LEM_out_buffer, est_response_buffer, validation_error = buffers
+        EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error = buffers
 
         loss_history.append(torch.mean(loss).item())
         validation_error_history.append(validation_error.item())
@@ -945,7 +956,7 @@ if __name__ == "__main__":
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -965,8 +976,8 @@ if __name__ == "__main__":
                         EQ_params -= mu_opt*(mu_opt) * update.view_as(EQ_params)
                 EQ_params.grad = None
             case "Newton":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_bufferEQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # Log Hessian condition number
                 hess_cond_history.append(torch.linalg.cond(hess.detach().cpu().float()).item())
@@ -979,8 +990,8 @@ if __name__ == "__main__":
                     EQ_params -= mu_opt * update_ridge.view_as(EQ_params)
 
             case "GHAM-3" | "GHAM-4":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI)
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI)
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -998,7 +1009,7 @@ if __name__ == "__main__":
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
-                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
+                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI).squeeze()
                         residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
                         theta_4 = theta_3 + lstsq(jac,residual_4).solution
                         correction = theta_1 + theta_2 + theta_3 + theta_4
@@ -1013,8 +1024,8 @@ if __name__ == "__main__":
             EQ_params.clamp_(0.0, 1.0)
             EQ_out_buffer = EQ_out_buffer.detach() # prevent graph accumulation across iterations
             LEM_out_buffer = LEM_out_buffer.detach()
-            est_response_buffer = est_response_buffer.detach()
-
+            est_mag_response_buffer = est_mag_response_buffer.detach()
+            est_cpx_response_buffer = est_cpx_response_buffer.detach()
         # Store output frame (only store hop_len new samples to handle overlap-add)
         end_idx = min(start_idx + frame_len, T)
         samples_to_store = end_idx - start_idx
