@@ -373,6 +373,44 @@ def interp_to_log_freq(mag_db, freqs_lin, n_points=None, f_min=None, f_max=None)
 
 
 
+class LEMConv(torch.autograd.Function):
+    """
+    Custom LEM convolution:
+    - forward: uses true LEM impulse response (h_true)
+    - backward: uses estimated LEM impulse response (h_est) via FFT-based convolution
+    """
+
+    @staticmethod
+    def forward(ctx, x, h_true, h_est):
+        """Forward pass using true LEM impulse response.
+
+        Args:
+            x:      (B, 1, N) input signal segment
+            h_true: (1, 1, M) true LEM IR (no grad)
+            h_est:  (1, 1, M) estimated LEM IR used only for gradients
+        """
+        y = torchaudio.functional.fftconvolve(x, h_true, mode="full")
+        ctx.save_for_backward(h_est)
+        ctx.input_len = x.shape[-1]
+        ctx.LEM_len = h_true.shape[-1]
+        return y
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Backward pass using estimated LEM impulse response via FFT-based convolution."""
+        (h_est,) = ctx.saved_tensors
+        N = ctx.input_len
+        M = ctx.LEM_len
+
+        grad_full = torchaudio.functional.fftconvolve(grad_output, torch.flip(h_est, dims=[-1]), mode="full")
+
+        grad_x = grad_full[..., M-1:M-1+N]
+
+        return grad_x, None, None
+
+
+
+
 def params_to_loss(EQ_params,
             in_buffer,
             EQ_out_buffer,
@@ -397,8 +435,14 @@ def params_to_loss(EQ_params,
     EQ_out_buffer += EQ_out
 
     # Process through LEM
-    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-    
+    #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    LEM_est_buffer = LEM.view(1, 1, -1).detach() # True response for backward pass for now
+    LEM_out = LEMConv.apply(
+        EQ_out_buffer[:, :, :frame_len],
+        LEM.view(1, 1, -1),
+        LEM_est_buffer
+    )
+
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
@@ -481,8 +525,14 @@ def process_buffers(EQ_params,
     EQ_out_buffer += EQ_out
 
     # Process through LEM
-    LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
-    
+    #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    LEM_est_buffer = LEM.view(1, 1, -1).detach() # True response for backward pass for now
+    LEM_out = LEMConv.apply(
+        EQ_out_buffer[:, :, :frame_len],
+        LEM.view(1, 1, -1),
+        LEM_est_buffer
+    )
+
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
