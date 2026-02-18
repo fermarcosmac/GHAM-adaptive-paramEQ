@@ -5,7 +5,7 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["SGD","GHAM-1","GHAM-3"],
+    "optim_type": ["SGD","GHAM-1","GHAM-2"],
     "mu_opt": [0.02],
     "loss_type": ["FD-MSE"],
     "eps_0": [2.0],
