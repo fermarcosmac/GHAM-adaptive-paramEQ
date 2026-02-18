@@ -1,14 +1,19 @@
-import json, itertools, random, sys, torch
+import json, itertools, random, sys, math, torch, torchaudio
 from pathlib import Path
-from typing import Dict, Any, Iterable, List, Tuple
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.optimize import least_squares
-import soundfile as sf
-import torch.nn.functional as F
 root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
+from typing import Dict, Any, Iterable, List, Tuple
+import numpy as np
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+from scipy.optimize import least_squares
+from scipy.signal import minimum_phase
+import soundfile as sf
+import torch.nn.functional as F
+from torch.func import jacrev, jacfwd
+from torch.linalg import lstsq
+from modules_ex04 import LEMConv
 from lib.local_dasp_pytorch.modules import ParametricEQ
 from utils import (
     load_audio,
@@ -626,6 +631,400 @@ def get_compensation_EQ_params(rir: np.ndarray, sr: int, ROI: Tuple[float, float
     }
 
 
+def build_target_response_lin_phase(sr: int, response_type: str = "delay_only",
+                           target_mag_resp: np.ndarray = None, target_mag_freqs: np.ndarray = None, 
+                           fir_len: int = 1024, ROI: tuple = None, rolloff_octaves: float = 1.0,
+                           device: torch.device = None):
+    """Build a desired response FIR filter with optional target magnitude response.
+    
+    Args:
+        sr: Sample rate in Hz
+        response_type: Type of response - "delay_only" or "delay_and_mag"
+        target_mag_resp: Target magnitude response in dB (1D array), required if response_type="delay_and_mag"
+        target_mag_freqs: Frequency axis for target_mag_resp in Hz (1D array), required if response_type="delay_and_mag"
+        fir_len: Length of the FIR filter for magnitude shaping (default 1024)
+        ROI: Region of interest as (low_freq, high_freq) in Hz. Frequencies outside will be attenuated.
+        rolloff_octaves: Width of the rolloff transition in octaves (default 1.0)
+        device: Torch device for output tensor
+        
+    Returns:
+        target_response: Tensor of shape (1, 1, N) representing the desired impulse response
+    """
+    if device is None:
+        device = torch.device("cpu")
+    
+    if response_type == "delay_only":
+        # Simple Kronecker delta (no delay - add delay externally if needed)
+        target_response = torch.zeros(1, 1, fir_len, device=device)
+        target_response[:, :, 0] = 1.0
+        
+    elif response_type == "delay_and_mag":
+        if target_mag_resp is None or target_mag_freqs is None:
+            raise ValueError("target_mag_resp and target_mag_freqs are required for response_type='delay_and_mag'")
+        
+        # Interpolate target magnitude response to FFT bins
+        fft_freqs = np.fft.rfftfreq(fir_len, d=1.0/sr)
+        
+        # Interpolate target magnitude response (in dB) to FFT frequency bins
+        target_mag_interp_db = np.interp(fft_freqs, target_mag_freqs, target_mag_resp)
+        
+        # Apply ROI rolloff: attenuate frequencies outside the region of interest
+        # The target_mag_resp is kept as-is within ROI; decay starts exactly at ROI boundaries
+        if ROI is not None:
+            f_low, f_high = ROI
+            rolloff_mask_db = np.zeros_like(fft_freqs)
+            
+            # Low-frequency decay (below f_low)
+            # Decay starts at f_low (0 dB) and reaches -120 dB at f_low_end
+            f_low_end = f_low / (2 ** rolloff_octaves)
+            for i, f in enumerate(fft_freqs):
+                if f <= 0:
+                    rolloff_mask_db[i] = -120  # DC component heavily attenuated
+                elif f < f_low_end:
+                    rolloff_mask_db[i] = -120  # Full attenuation below rolloff end
+                elif f < f_low:
+                    # Smooth cosine transition from 0 dB (at f_low) to -120 dB (at f_low_end)
+                    # t=0 at f_low, t=1 at f_low_end
+                    t = np.log2(f_low / f) / rolloff_octaves  # 0 at f_low, 1 at f_low_end
+                    rolloff_mask_db[i] = -120 * 0.5 * (1 - np.cos(np.pi * t))
+            
+            # High-frequency decay (above f_high)
+            # Decay starts at f_high (0 dB) and reaches -120 dB at f_high_end
+            f_high_end = f_high * (2 ** rolloff_octaves)
+            for i, f in enumerate(fft_freqs):
+                if f > f_high_end:
+                    rolloff_mask_db[i] = -120  # Full attenuation above rolloff end
+                elif f > f_high:
+                    # Smooth cosine transition from 0 dB (at f_high) to -120 dB (at f_high_end)
+                    # t=0 at f_high, t=1 at f_high_end
+                    t = np.log2(f / f_high) / rolloff_octaves  # 0 at f_high, 1 at f_high_end
+                    rolloff_mask_db[i] = -120 * 0.5 * (1 - np.cos(np.pi * t))
+            
+            # Apply rolloff mask to target magnitude
+            target_mag_interp_db = target_mag_interp_db + rolloff_mask_db
+        
+        # Convert from dB to linear magnitude
+        target_mag_interp_linear = 10 ** (target_mag_interp_db / 20.0)
+        
+        # Create linear-phase FIR filter via IFFT (zero-phase, then shift for causality)
+        H_mag = torch.from_numpy(target_mag_interp_linear).float().to(device)
+        
+        # Create zero-phase impulse response via IFFT
+        h_zerophase = torch.fft.irfft(H_mag, n=fir_len)
+        
+        # Shift to make causal (linear phase) by circular shift
+        h_causal = torch.roll(h_zerophase, fir_len // 2)
+        
+        # Apply a window to smooth the filter
+        fir_window = torch.hann_window(fir_len, device=device)
+        h_windowed = h_causal * fir_window
+        
+        # Normalize filter to unity gain at passband
+        h_windowed = h_windowed / h_windowed.abs().max()
+        
+        target_response = h_windowed.view(1, 1, -1)
+        
+    else:
+        raise ValueError(f"Unknown response_type: {response_type}. Use 'delay_only' or 'delay_and_mag'")
+    
+    return target_response
+
+
+def interp_to_log_freq(mag_db, freqs_lin, n_points=None, f_min=None, f_max=None):
+    """Interpolate magnitude response from linear to log-spaced frequency bins.
+    
+    This enables perceptually-uniform smoothing: lower frequencies get more detail,
+    higher frequencies get less, matching human hearing characteristics.
+    
+    Args:
+        mag_db: Magnitude response in dB (1D tensor on linear freq bins)
+        freqs_lin: Linear frequency axis (1D tensor)
+        n_points: Number of log-spaced points (default: same as input)
+        f_min: Minimum frequency (default: first non-zero freq)
+        f_max: Maximum frequency (default: last freq)
+    
+    Returns:
+        mag_db_log: Magnitude response at log-spaced frequencies
+        freqs_log: Log-spaced frequency axis
+    """
+    if n_points is None:
+        n_points = len(freqs_lin)
+    if f_min is None:
+        f_min = freqs_lin[freqs_lin > 0][0].item()  # Skip DC
+    if f_max is None:
+        f_max = freqs_lin[-1].item()
+    
+    # Create log-spaced frequency points
+    freqs_log = torch.logspace(
+        torch.log10(torch.tensor(f_min, device=mag_db.device)),
+        torch.log10(torch.tensor(f_max, device=mag_db.device)),
+        n_points,
+        device=mag_db.device
+    )
+    
+    # Linear interpolation: find indices and weights
+    indices = torch.searchsorted(freqs_lin.contiguous(), freqs_log.contiguous())
+    indices = torch.clamp(indices, 1, len(freqs_lin) - 1)  # Ensure valid indices
+    
+    # Get surrounding values and frequencies
+    idx_low = indices - 1
+    idx_high = indices
+    
+    f_low = freqs_lin[idx_low]
+    f_high = freqs_lin[idx_high]
+    mag_low = mag_db[idx_low]
+    mag_high = mag_db[idx_high]
+    
+    # Linear interpolation weights
+    weights = (freqs_log - f_low) / (f_high - f_low + 1e-10)
+    weights = torch.clamp(weights, 0, 1)
+    
+    # Interpolate
+    mag_db_log = mag_low + weights * (mag_high - mag_low)
+    
+    return mag_db_log, freqs_log
+
+
+def _movmean_1d(x: torch.Tensor, L_before: int, L_after: int) -> torch.Tensor:
+    """1D moving average with asymmetric window.
+
+    Uses edge-aware normalization so that near the boundaries the average
+    is taken over the valid samples only (no zero-padding bias).
+    """
+    if x.ndim != 1:
+        x = x.view(-1)
+    N = x.numel()
+    if N == 0:
+        return x.clone()
+
+    L_before = max(int(L_before), 0)
+    L_after = max(int(L_after), 0)
+
+    # Cumulative sum with a leading zero for convenient segment sums
+    cumsum = torch.cumsum(F.pad(x, (1, 0)), dim=0)  # (N+1,)
+    idx = torch.arange(N, device=x.device)
+
+    left = torch.clamp(idx - L_before, 0, N - 1)
+    right = torch.clamp(idx + L_after, 0, N - 1)
+
+    seg_sum = cumsum[right + 1] - cumsum[left]
+    count = (right - left + 1).to(x.dtype)
+    return seg_sum / count
+
+
+def kirkeby_deconvolve(x, y, nfft, sr, ROI):
+    """Kirkeby deconvolution to compute stable inverse filter in frequency domain.
+    Args:
+        x:   input signal (1D tensor), excitation
+        y:   output signal (1D tensor)
+        nfft: FFT size for deconvolution (should be >= len(x) + len(y) - 1)
+        sr:  sample rate in Hz
+        ROI: (f_low, f_high) in Hz, frequency band of interest
+
+    Returns:
+        H: Estimated complex frequency response (1D tensor of length nfft//2 + 1)
+    """
+    X = torch.fft.rfft(x, n=nfft)
+    Y = torch.fft.rfft(y, n=nfft)
+
+    N = X.shape[-1]  # number of rfft bins = floor(nfft/2) + 1
+    device = X.device
+    dtype_real = X.real.dtype
+
+    # Build Xflat, flat mask with smooth rolloff outside ROI)
+    Xflat = torch.zeros(N, device=device, dtype=dtype_real)
+    if ROI is not None:
+        f_low, f_high = float(ROI[0]), float(ROI[1])
+        # Map frequency to bin index using full-FFT convention (same as MATLAB): k * sr / nfft
+        f0_bin = int(math.ceil((f_low / sr) * nfft))
+        f1_bin = int(math.floor((f_high / sr) * nfft))
+    else:
+        # If no ROI is given, consider the full band
+        f0_bin, f1_bin = 0, N - 1
+    # Clamp to valid rfft bin range
+    f0_bin = max(0, min(f0_bin, N - 1))
+    f1_bin = max(0, min(f1_bin, N - 1))
+    if f1_bin >= f0_bin:
+        Xflat[f0_bin:f1_bin + 1] = 1.0
+
+    # Smoothing windows, following LL and SL logic from MATLAB
+    LL = max(1, int(round(N * 1e-1)))  # long window
+    SL = max(1, int(round(N * 1e-3)))  # short window
+
+    Xflat_LL_SL = _movmean_1d(Xflat, LL, SL)
+    Xflat_SL_LL = _movmean_1d(Xflat, SL, LL)
+    Xflat_smooth = torch.minimum(Xflat_LL_SL, Xflat_SL_LL)
+
+    mflat = torch.max(Xflat_smooth)
+
+    if mflat <= 0:
+        # Degenerate case: ROI does not overlap the rfft band; fall back to small constant epsilon
+        epsilon = torch.full_like(Xflat_smooth, 1e-8)
+    else:
+        # Frequency-dependent epsilon (from MATLAB implementation)
+        epsilon = torch.maximum(1e-4 * mflat, 0.38 * mflat - Xflat_smooth)
+
+    # Apply Kirkeby-style deconvolution filter with frequency-dependent epsilon
+    denom = X * X.conj_physical() + epsilon.to(X.dtype)
+    H = (Y * X.conj_physical()) / denom
+
+    return H
+
+
+def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
+    """Compute element-wise squared error between predicted and true signals.
+    
+    Args:
+        y_pred: Predicted signal tensor
+        y_true: True signal tensor
+    Returns:
+        Element-wise squared error tensor
+    """
+    return (y_pred - y_true) ** 2
+
+
+def update_LEM(current_time_s, n_rirs, transition_times_s, rirs_tensors):
+    """Update LEM based on current time and transition schedule.
+    
+    Args:
+        current_time_s: Current time in seconds
+        n_rirs: Number of RIRs
+        transition_times_s: List of (start_time, end_time) tuples for each transition
+        rirs_tensors: List of RIR tensors
+    
+    Returns:
+        LEM: Updated LEM tensor of shape (1, 1, -1)
+    """
+    if n_rirs <= 1:
+        return rirs_tensors[0].view(1, 1, -1)
+    
+    # Find which RIR segment we're in and compute interpolation
+    current_rir_idx = 0
+    in_transition = False
+    alpha = 0.0  # interpolation factor (0 = previous RIR, 1 = current RIR)
+    
+    for i, (t_start, t_end) in enumerate(transition_times_s):
+        if current_time_s >= t_end:
+            # Past this transition entirely - use the new RIR
+            current_rir_idx = i + 1
+            in_transition = False
+        elif current_time_s >= t_start:
+            # In the middle of this transition
+            current_rir_idx = i + 1
+            in_transition = True
+            if t_end > t_start:  # smooth transition
+                alpha = (current_time_s - t_start) / (t_end - t_start)
+            else:  # abrupt (t_start == t_end)
+                alpha = 1.0  # instant jump to new RIR
+            break
+    
+    # Interpolate between RIRs if in transition
+    if in_transition and current_rir_idx > 0:
+        prev_rir = rirs_tensors[current_rir_idx - 1]
+        curr_rir = rirs_tensors[current_rir_idx]
+        return interpolate_IRs(alpha, prev_rir, curr_rir)
+    else:
+        return rirs_tensors[current_rir_idx].view(1, 1, -1)
+
+
+def interpolate_IRs(alpha, prev_rir: torch.Tensor, curr_rir: torch.Tensor) -> torch.Tensor:
+    """
+    Interpolate between two RIRs by interpolating magnitude (in dB) and unwrapped phase.
+
+    Args:
+        alpha: scalar in [0,1] (0 -> prev_rir, 1 -> curr_rir). Can be Python float or 0-dim tensor.
+        prev_rir: 1-D torch tensor (num_samples,) or 2/3-D variant (we'll squeeze). On device.
+        curr_rir: same shape as prev_rir or will be padded to match.
+
+    Returns:
+        interpolated_ir: torch.Tensor shaped (1, 1, N) where N == max(len(prev_rir), len(curr_rir))
+    """
+    # Convert alpha to float on CPU (safe) or to tensor on device
+    if isinstance(alpha, torch.Tensor):
+        alpha_val = float(alpha.item())
+    else:
+        alpha_val = float(alpha)
+
+    # Squeeze input RIRs to 1-D
+    x1 = prev_rir.detach().squeeze().to(torch.get_default_dtype())
+    x2 = curr_rir.detach().squeeze().to(torch.get_default_dtype())
+
+    # Move to same device
+    device = prev_rir.device if isinstance(prev_rir, torch.Tensor) else torch.device("cpu")
+    x1 = x1.to(device)
+    x2 = x2.to(device)
+
+    # Pad to same length if necessary
+    n1 = x1.numel()
+    n2 = x2.numel()
+    n = max(n1, n2)
+    if n1 < n:
+        x1 = F.pad(x1, (0, n - n1))
+    if n2 < n:
+        x2 = F.pad(x2, (0, n - n2))
+
+    # FFT size (use same length as time-domain signals)
+    nfft = n
+
+    # Compute complex frequency responses (rfft)
+    H1 = torch.fft.rfft(x1, n=nfft)
+    H2 = torch.fft.rfft(x2, n=nfft)
+
+    eps = 1e-12
+
+    # Magnitudes and phases
+    mag1 = torch.abs(H1)
+    mag2 = torch.abs(H2)
+
+    # Convert magnitude to dB for interpolation (more perceptually linear)
+    mag_db1 = 20.0 * torch.log10(mag1 + eps)
+    mag_db2 = 20.0 * torch.log10(mag2 + eps)
+
+    # Phases (atan2)
+    phase1 = torch.atan2(H1.imag, H1.real)
+    phase2 = torch.atan2(H2.imag, H2.real)
+
+    # Unwrap phases along frequency axis
+    # rfft returns length floor(nfft/2)+1 bins — unwrap works on that 1D array
+    phase1_un = _unwrap_phase(phase1)
+    phase2_un = _unwrap_phase(phase2)
+
+    # Interpolate magnitude-in-dB and unwrapped phase
+    mag_db_interp = (1.0 - alpha_val) * mag_db1 + alpha_val * mag_db2
+    phase_interp = (1.0 - alpha_val) * phase1_un + alpha_val * phase2_un
+
+    # Reconstruct complex spectrum from mag+phase
+    mag_lin = 10.0 ** (mag_db_interp / 20.0)
+
+    real = mag_lin * torch.cos(phase_interp)
+    imag = mag_lin * torch.sin(phase_interp)
+    H_interp = torch.complex(real, imag)
+
+    # IFFT back to time domain (real signal)
+    h_interp = torch.fft.irfft(H_interp, n=nfft)
+
+    # Return as shape (1,1,-1) to match how LEM is used elsewhere
+    return h_interp.view(1, 1, -1).to(device)
+
+
+def _unwrap_phase(phase: torch.Tensor) -> torch.Tensor:
+    """
+    Unwrap a 1-D phase tensor (radians) along its only axis.
+    Implements the same idea as numpy.unwrap: replace jumps > pi by their 2*pi complement.
+    """
+    # phase: 1-D tensor (N,)
+    if phase.numel() <= 1:
+        return phase.clone()
+    diff = phase[1:] - phase[:-1]                       # (N-1,)
+    # wrap diffs into (-pi, pi]
+    two_pi = 2.0 * math.pi
+    wrapped = (diff + math.pi) % two_pi - math.pi      # (N-1,)
+    # correction to apply to each subsequent element: wrapped - diff
+    corr = torch.cat([torch.tensor([0.], device=phase.device, dtype=phase.dtype),
+                      torch.cumsum(wrapped - diff, dim=0)])
+    return phase + corr
+
+
 #########################
 # Main experiment logic #
 #########################
@@ -739,9 +1138,21 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
     # TODO: plug in experiment_03 logic here
 
-    # Load config variables that are accessed many times
+    # Load config variables
+    input_type = input_spec[0]
+    max_audio_len_s = input_spec[1]["max_audio_len_s"]
     ROI = sim_cfg["ROI"]
     n_rirs = sim_cfg["n_rirs"]
+    loss_type = sim_cfg["loss_type"]
+    optim_type = sim_cfg["optim_type"]
+    mu_opt = sim_cfg["mu_opt"]
+    target_response_type = sim_cfg["target_response_type"]
+    frame_len = sim_cfg["frame_len"]
+    hop_len = sim_cfg["hop_len"]
+    forget_factor = sim_cfg["forget_factor"]
+    eps_0 = sim_cfg["eps_0"]
+    use_true_LEM = sim_cfg["use_true_LEM"]
+    debug_plot_state = sim_cfg["debug_plot"]
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -758,13 +1169,13 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         rirs_tensors = [F.pad(rir, (0, max_rir_len - rir.shape[0])) for rir in rirs_tensors]
         
         # Compute transition start/end times (in seconds)
-        segment_duration_s = input_spec[1]["max_audio_len_s"] / n_rirs
+        segment_duration_s = max_audio_len_s / n_rirs
         transition_times_s = [] 
         for i in range(1, n_rirs):
             transition_start_s = i * segment_duration_s
             assert (i==1) or (transition_start_s >= transition_times_s[-1][-1])
             transition_end_s = transition_start_s + sim_cfg["transition_time_s"]
-            transition_times_s.append((transition_start_s, min(transition_end_s, input_spec[1]["max_audio_len_s"])))
+            transition_times_s.append((transition_start_s, min(transition_end_s, max_audio_len_s)))
 
     # Compute target response
     lem_delay = get_delay_from_ir(rir_init, sr)
@@ -781,3 +1192,551 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
     EQ_memory = 128+80 # TODO: hardcoded for now (should be greater than 0)
+
+    # Load/synthesise the input audio (as torch tensors)
+    if input_type == "white_noise":
+        T = int(max_audio_len_s * sr)
+        input = torch.randn(T, device=device)
+
+    else:
+        audio_path = input_spec[1]["path"]
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+        
+        input, audio_sr = torchaudio.load(audio_path)
+        input = input.to(device)
+        
+        if input.shape[0] > 1:
+            input = input.mean(dim=0) # convert to mono
+        else:
+            input = input.squeeze(0)
+        
+        if audio_sr != sr:  # match sample rates
+            resampler = torchaudio.transforms.Resample(orig_freq=audio_sr, new_freq=sr)
+            input = resampler(input)
+            print(f"Resampled audio from {audio_sr} Hz to {sr} Hz")
+        
+        if max_audio_len_s is not None:
+            max_samples = int(max_audio_len_s * sr)
+            if len(input) > max_samples:
+                input = input[:max_samples]     # truncate to max length
+                print(f"Truncated audio to first {max_audio_len_s} seconds")
+
+        T = len(input)
+        T_seconds = T / sr
+        print(f"Input signal: {input_type} ({T_seconds:.2f} s, {T} samples)")
+    input = input / input.abs().max()   # normalization
+    input = input.view(1,1,-1).to(device)
+
+    # Set optimization (adaptive filtering)
+    match optim_type:
+        case "SGD":
+            optimizer = torch.optim.SGD([EQ_params], lr=mu_opt)
+        case "Adam":
+            optimizer = torch.optim.Adam([EQ_params], lr=mu_opt)
+        case "Muon":
+            raise ValueError("Muon optimizer requires newer PyTorch version.")
+            optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
+        case "GHAM-1" | "GHAM-2":
+            match loss_type:
+                case "TD-MSE" | "FD-MSE":
+                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                case "TD-SE" | "FD-SE":
+                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
+        case "Newton" | "GHAM-3" | "GHAM-4":
+            match loss_type:
+                case "TD-MSE" | "FD-MSE":
+                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                case "TD-SE" | "FD-SE":
+                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
+            hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
+            if optim_type == "GHAM-4":
+                jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
+        case "LBFGS":
+            raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
+
+    # Build desired response: delay + optional target magnitude response
+    total_delay = lem_delay + 7  # TODO: add EQ group delay if necessary. Hardcoded for now!
+    target_response = build_target_response_lin_phase(
+        sr=sr,
+        response_type=target_response_type,
+        target_mag_resp=target_mag_resp,
+        target_mag_freqs=target_mag_freqs,
+        fir_len=1024,
+        ROI=ROI,
+        rolloff_octaves=1.0,
+        device=device
+    )
+
+    # Convert linear-phase desired response to minimum phase (minimize group delay) and add desired delay
+    h_linear_np = target_response.squeeze().cpu().numpy()
+    h_minphase_np = minimum_phase(h_linear_np, method='homomorphic', half=False)
+    delay_zeros = torch.zeros(total_delay, device=device)
+    h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
+    target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
+
+    # Precompute desired output
+    desired_output = torchaudio.functional.fftconvolve(input, target_response, mode="full")
+    print(f"Precomputed desired output (type: {target_response_type})")
+    
+    # Initialize loss & loss history
+    match loss_type:
+        case "TD-MSE" | "FD-MSE":
+            loss_fcn = F.mse_loss
+        case "TD-SE" | "FD-SE":
+            loss_fcn = squared_error
+        case _:
+            raise NotImplementedError(f"Not yet implemented loss_type: {loss_type}. Use 'TD-MSE'")
+    loss_history = []
+    validation_error_history = []
+    jac_norm_history = []
+    jac_cond_history = []
+    hess_cond_history = []
+    irreducible_loss_history = []
+
+    # Initialize buffers
+    y_control = torch.zeros(1,1,T, device=device)                       # output audio allocation
+    in_buffer = torch.zeros(1,1,frame_len, device=device)               # input audio buffer
+    EQ_out_len = next_power_of_2(2*frame_len - 1) # match dasp_pytorch sosfilt_via_fms implementation
+    EQ_out_buffer = torch.zeros(1,1,EQ_out_len, device=device)          # buffer for EQ output (input to LEM)
+    LEM_out_len = frame_len + LEM.shape[-1] - 1
+    LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)        # buffer for soundsystem output
+    est_mag_response_buffer = torch.zeros(1,1,frame_len, device=device) # buffer for estimated soundsystem response
+    est_cpx_response_buffer = torch.fft.rfft(target_response,n=2*frame_len-1)       # buffer for estimated complex soundsystem response
+    EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
+    rir_idx = 0                                                         # response index (adaptive scenarios)
+    
+
+    #####################
+    ##### Main loop #####
+    #####################
+
+    n_frames = (T - frame_len) // hop_len + 1
+    for k in tqdm(range(n_frames), desc="Processing", unit="frame"):
+
+        start_idx = k * hop_len
+        current_time_s = start_idx / sr
+
+        # Update LEM based on current time and transition schedule
+        if n_rirs > 1:
+            LEM = update_LEM(current_time_s, n_rirs, transition_times_s, rirs_tensors)
+        
+        # Update input buffer and apply window
+        in_buffer = input[:,:,start_idx:start_idx+frame_len]
+
+        # Get target frame
+        target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
+
+        loss, buffers = process_buffers(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            est_mag_response_buffer,
+            est_cpx_response_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame,
+            target_response,
+            forget_factor,
+            loss_type,
+            loss_fcn,
+            sr=sr,
+            ROI=ROI,
+            use_true_LEM=use_true_LEM,
+            debug_plot_state=debug_plot_state)
+        EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error = buffers
+
+        loss_history.append(torch.mean(loss).item())
+        validation_error_history.append(validation_error.item())
+
+        #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
+
+        # Backpropagate and update EQ parameters
+        match optim_type:
+            case "GHAM-1" | "GHAM-2":
+                match loss_type:
+                    case "TD-MSE" | "FD-MSE":
+                        loss.backward()
+                        jac = EQ_params.grad.clone().view(1,-1)
+                    case "TD-SE" | "FD-SE":
+                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                
+                # TODO: check if this nonnegativity really prevents oscilatory behaviour
+                loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
+                
+                # Log irreducible loss and jacobian condition number
+                irreducible_loss_history.append(loss_val.mean().item())
+                jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
+                
+                with torch.no_grad():
+                    b = loss_val.view(-1,1)                # (loss_dims, 1)
+                    update = lstsq(jac, b).solution        # (num_params, 1)
+                    #ridge_regressor.fit(jac,b)
+                    #update_ridge = ridge_regressor.w      # (num_params, 1)
+                    if optim_type == "GHAM-1":
+                        EQ_params -= mu_opt * update.view_as(EQ_params)
+                    elif optim_type == "GHAM-2":
+                        EQ_params -= mu_opt*(mu_opt) * update.view_as(EQ_params)
+                EQ_params.grad = None
+            case "Newton":
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                
+                # Log Hessian condition number
+                hess_cond_history.append(torch.linalg.cond(hess.detach().cpu().float()).item())
+                
+                with torch.no_grad():
+                    jac = jac.view(-1,1)
+                    update = lstsq(hess, jac).solution        # (num_params, 1)
+                    #ridge_regressor.fit(hess,jac)
+                    #update_ridge = ridge_regressor.w           # (num_params, 1)
+                    EQ_params -= mu_opt * update.view_as(EQ_params)
+
+            case "GHAM-3" | "GHAM-4":
+                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
+                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                
+                # TODO: check if this nonnegativity really prevents oscilatory behaviour
+                loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
+                loss_val = loss_val.view(-1,1)
+
+                # Log irreducible loss and jacobian condition number
+                irreducible_loss_history.append(loss_val.mean().item())
+                jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
+
+                with torch.no_grad():
+                    theta_1 = -mu_opt * lstsq(jac, loss_val).solution
+                    theta_2 = (1-mu_opt)*theta_1
+                    residual_3 = -mu_opt * theta_1.T@hess@theta_1 + jac@theta_2
+                    theta_3 = theta_2 + lstsq(jac,residual_3).solution
+                    if optim_type == "GHAM-3":
+                        correction = theta_1 + theta_2 + theta_3
+                    elif optim_type == "GHAM-4":
+                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                        residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
+                        theta_4 = theta_3 + lstsq(jac,residual_4).solution
+                        correction = theta_1 + theta_2 + theta_3 + theta_4
+                    EQ_params += correction.view_as(EQ_params)
+            case _:
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+
+        with torch.no_grad():
+            EQ_params.clamp_(0.0, 1.0)
+            EQ_out_buffer = EQ_out_buffer.detach() # prevent graph accumulation across iterations
+            LEM_out_buffer = LEM_out_buffer.detach()
+            est_mag_response_buffer = est_mag_response_buffer.detach()
+            est_cpx_response_buffer = est_cpx_response_buffer.detach()
+        # Store output frame (only store hop_len new samples to handle overlap-add)
+        end_idx = min(start_idx + frame_len, T)
+        samples_to_store = end_idx - start_idx
+        y_control[:, :, start_idx:end_idx] += LEM_out_buffer[:, :, :samples_to_store]
+
+    # TODO: CONTINUE HERE...
+    pass
+
+
+def params_to_loss(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            est_mag_response_buffer,
+            est_cpx_response_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame,
+            target_response,
+            forget_factor,
+            loss_fcn,
+            loss_type,
+            sr=None,
+            ROI=None,
+            use_true_LEM=False):
+    # Process through EQ
+    EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+
+    # Update EQ output buffer (shift left by hop_len and add new samples)
+    EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    EQ_out_buffer += EQ_out
+
+    # Process through LEM
+    #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    if use_true_LEM:
+        LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass
+    else:
+        LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+    LEM_out = LEMConv.apply(
+        EQ_out_buffer[:, :, :frame_len],
+        LEM.view(1, 1, -1),
+        LEM_est
+    )
+
+    # Update LEM output buffer (shift left by hop_len)
+    LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    LEM_out_buffer += LEM_out
+
+    # # Deconvolve actual response within ROI limits
+    nfft = 2*frame_len-1
+    freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
+    eps = 1e-8
+    LEM_H_est = kirkeby_deconvolve(EQ_out_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
+    if ROI is not None:
+        roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
+        # Set H_complex to 1 (no amplification) outside ROI
+        #H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
+    else:
+        roi_mask = torch.ones_like(LEM_H_est, dtype=torch.bool)
+    
+    if torch.sum(torch.abs(est_mag_response_buffer)) == 0:
+        forget_factor_loss = 1.0
+    else:
+        forget_factor_loss = forget_factor
+    
+    # Use LEM output to compute loss and update EQ parameters
+    match loss_type:
+        case "FD-MSE" | "FD-SE":
+
+            # Compute full soundsystem (EQ+LEM) frequency response
+            H_SS = kirkeby_deconvolve(in_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
+
+            H_mag_db_current = 20*torch.log10(torch.abs(H_SS) + eps)
+            H_mag_db = (forget_factor_loss)*H_mag_db_current + (1-forget_factor_loss)*est_mag_response_buffer.squeeze()
+            est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
+            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+
+            # ROI-limited responses
+            freqs_roi = freqs[roi_mask]
+            H_mag_db_roi = H_mag_db[roi_mask]
+            desired_mag_db_roi = desired_mag_db[roi_mask]
+
+            # Resample to log-frequency axis for perceptually-uniform processing
+            n_log_points = 256  # Number of log-spaced frequency points
+            H_mag_db_log, _ = interp_to_log_freq(H_mag_db_roi, freqs_roi, n_points=n_log_points)
+            desired_mag_db_log, _ = interp_to_log_freq(desired_mag_db_roi, freqs_roi, n_points=n_log_points)
+
+            # Smooth on log-frequency axis using PyTorch conv1d (moving average)
+            smooth_window = 15  # Kernel size (odd)
+            smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
+            padding = smooth_window // 2
+            H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            
+            loss = loss_fcn(H_mag_db_log_smoothed, desired_mag_db_log_smoothed)
+
+        case _:
+            loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
+
+    return loss
+
+
+def process_buffers(EQ_params,
+            in_buffer,
+            EQ_out_buffer,
+            LEM_out_buffer,
+            est_mag_response_buffer,
+            est_cpx_response_buffer,
+            EQ,
+            LEM,
+            frame_len,
+            hop_len,
+            target_frame,
+            target_response,
+            forget_factor,
+            loss_type,
+            loss_fcn,
+            sr=None,
+            ROI=None,
+            use_true_LEM=False,
+            debug_plot_state=None):
+    # Process through EQ
+    EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+
+    # Update EQ output buffer (shift left by hop_len and add new samples)
+    EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    EQ_out_buffer += EQ_out
+
+    # Process through LEM
+    #LEM_out = torchaudio.functional.fftconvolve(EQ_out_buffer[:,:,:frame_len], LEM.view(1,1,-1), mode="full")
+    if use_true_LEM:
+        LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass
+    else:
+        LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+    LEM_out = LEMConv.apply(
+        EQ_out_buffer[:, :, :frame_len],
+        LEM.view(1, 1, -1),
+        LEM_est
+    )
+
+    # Update LEM output buffer (shift left by hop_len)
+    LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
+    LEM_out_buffer += LEM_out
+
+    # Deconvolve actual response within ROI limits
+    nfft = 2*frame_len-1
+    freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
+    eps = 1e-8
+    LEM_H_est = kirkeby_deconvolve(EQ_out_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
+    if ROI is not None:
+        roi_mask = (freqs >= ROI[0]) & (freqs <= ROI[1])
+        # Set H_complex to 1 (no amplification) outside ROI
+        #H = torch.where(roi_mask, H, torch.zeros_like(H) + eps)
+    else:
+        roi_mask = torch.ones_like(LEM_H_est, dtype=torch.bool)
+    
+    if torch.sum(torch.abs(est_mag_response_buffer)) == 0:
+        forget_factor_loss = 1.0
+        forget_factor_cpx = 1.0
+    else:
+        forget_factor_loss = forget_factor
+        forget_factor_cpx = forget_factor
+    
+    # TODO: Update buffered complex response
+    est_cpx_response_buffer = (1-forget_factor_cpx)*est_cpx_response_buffer + forget_factor_cpx*LEM_H_est.view(1,1,-1).detach()
+
+    # Use LEM output to compute loss and update EQ parameters
+    match loss_type:
+        case "FD-MSE" | "FD-SE":
+
+            # Compute full soundsystem (EQ+LEM) frequency response
+            H_SS = kirkeby_deconvolve(in_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
+
+            # Compute magnitude responses
+            H_mag_db_current = 20*torch.log10(torch.abs(H_SS) + eps)
+            H_mag_db = (forget_factor_loss)*H_mag_db_current + (1-forget_factor_loss)*est_mag_response_buffer.squeeze()
+            est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
+            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+            LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
+            LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
+
+            # ROI-limited responses (keep as tensors)
+            freqs_roi = freqs[roi_mask]
+            H_mag_db_roi = H_mag_db[roi_mask]
+            H_mag_db_current_roi = H_mag_db_current[roi_mask]
+            LEM_mag_db_roi = LEM_mag_db[roi_mask]
+            desired_mag_db_roi = desired_mag_db[roi_mask]
+
+            # ROI-limited running complex estimate magnitude (from est_cpx_response_buffer)
+            H_est_cpx = est_cpx_response_buffer.squeeze()
+            H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx) + eps)
+            H_est_cpx_mag_db_roi = H_est_cpx_mag_db[roi_mask]
+
+            # Resample to log-frequency axis for perceptually-uniform processing
+            n_log_points = 256  # Number of log-spaced frequency points
+            H_mag_db_log, freqs_log = interp_to_log_freq(H_mag_db_roi, freqs_roi, n_points=n_log_points)
+            H_mag_db_current_log, _ = interp_to_log_freq(H_mag_db_current_roi, freqs_roi, n_points=n_log_points)
+            LEM_mag_db_log, _ = interp_to_log_freq(LEM_mag_db_roi, freqs_roi, n_points=n_log_points)
+            desired_mag_db_log, _ = interp_to_log_freq(desired_mag_db_roi, freqs_roi, n_points=n_log_points)
+            H_est_cpx_mag_db_log, _ = interp_to_log_freq(H_est_cpx_mag_db_roi, freqs_roi, n_points=n_log_points)
+
+            # Smooth on log-frequency axis using PyTorch conv1d (moving average)
+            # This gives more detail at low frequencies, less at high frequencies (perceptually uniform)
+            smooth_window = 15  # Kernel size (odd), smaller than before since we have fewer points
+            smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
+            padding = smooth_window // 2
+            H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            H_mag_db_current_log_smoothed = F.conv1d(H_mag_db_current_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            LEM_mag_db_log_smoothed = F.conv1d(LEM_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+            desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+
+            # TODO: estimate and plot LEM magnitude response as well (currently just the true LEM response, which is not available in practice but serves as a reference)
+            # We'll use it later for gradient injection!
+
+            # Compute loss and validation error on log-frequency smoothed responses
+            loss = loss_fcn(H_mag_db_log_smoothed, desired_mag_db_log_smoothed)
+            validation_error = F.l1_loss(H_mag_db_log_smoothed, desired_mag_db_log_smoothed) / F.l1_loss(LEM_mag_db_log_smoothed, desired_mag_db_log_smoothed)
+
+            if debug_plot_state is not None:
+                # Convert frequency-domain data to numpy for plotting (log-frequency axis)
+                freqs_log_np = freqs_log.detach().cpu().numpy()
+                H_mag_db_log_np = H_mag_db_log.detach().cpu().numpy()
+                H_mag_db_log_smoothed_np = H_mag_db_log_smoothed.detach().cpu().numpy()
+                LEM_mag_db_log_np = LEM_mag_db_log.detach().cpu().numpy()
+                LEM_mag_db_log_smoothed_np = LEM_mag_db_log_smoothed.detach().cpu().numpy()
+                desired_mag_db_log_np = desired_mag_db_log.detach().cpu().numpy()
+                H_est_cpx_mag_db_log_np = H_est_cpx_mag_db_log.detach().cpu().numpy()
+
+                # Time-domain true vs estimated LEM responses
+                lem_true_td = LEM.squeeze()
+                lem_est_td = LEM_est.squeeze()
+                min_len_td = min(lem_true_td.numel(), lem_est_td.numel())
+                if min_len_td > 0:
+                    lem_true_td_np = lem_true_td[:min_len_td].detach().cpu().numpy()
+                    lem_est_td_np = lem_est_td[:min_len_td].detach().cpu().numpy()
+                    t_td_np = np.arange(min_len_td)
+                else:
+                    lem_true_td_np = np.array([])
+                    lem_est_td_np = np.array([])
+                    t_td_np = np.array([])
+
+                # Initialize plot on first call
+                if debug_plot_state.get('fig') is None:
+                    plt.ion()  # Enable interactive mode
+                    fig, (ax_mag, ax_td) = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+
+                    # Top subplot: magnitude responses (log-frequency)
+                    line_raw, = ax_mag.plot(freqs_log_np, H_mag_db_log_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
+                    line_smooth, = ax_mag.plot(freqs_log_np, H_mag_db_log_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
+                    line_desired, = ax_mag.plot(freqs_log_np, desired_mag_db_log_np, linewidth=1, label='Desired H(f)', color='tab:orange')
+                    line_lem_raw, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
+                    line_lem_smooth, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
+                    line_est_cpx, = ax_mag.plot(freqs_log_np, H_est_cpx_mag_db_log_np, linewidth=1.0, label='Estimated H_est(f) (from est_cpx)', color='tab:purple', alpha=0.8)
+                    ax_mag.set_xlabel("Frequency (Hz)")
+                    ax_mag.set_ylabel("Magnitude (dB)")
+                    ax_mag.set_xscale('log')
+                    ax_mag.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM (log-freq smoothing)")
+                    ax_mag.legend(loc='lower left')
+                    ax_mag.grid(True, alpha=0.3)
+                    ax_mag.set_ylim(-40, 30)  # Extended y-axis range for LEM
+
+                    # Bottom subplot: time-domain LEM IRs
+                    line_lem_true_td, = ax_td.plot(t_td_np, lem_true_td_np, linewidth=1.0, label='True LEM IR', color='tab:red')
+                    line_lem_est_td, = ax_td.plot(t_td_np, lem_est_td_np, linewidth=1.0, label='Estimated LEM_est IR', color='tab:purple', alpha=0.8)
+                    ax_td.set_xlabel("Sample")
+                    ax_td.set_ylabel("Amplitude")
+                    ax_td.set_title("Time-domain LEM Impulse Responses")
+                    ax_td.legend(loc='upper right')
+                    ax_td.grid(True, alpha=0.3)
+
+                    plt.tight_layout()
+                    debug_plot_state['fig'] = fig
+                    debug_plot_state['ax_mag'] = ax_mag
+                    debug_plot_state['ax_td'] = ax_td
+                    debug_plot_state['line_raw'] = line_raw
+                    debug_plot_state['line_smooth'] = line_smooth
+                    debug_plot_state['line_desired'] = line_desired
+                    debug_plot_state['line_lem_raw'] = line_lem_raw
+                    debug_plot_state['line_lem_smooth'] = line_lem_smooth
+                    debug_plot_state['line_est_cpx'] = line_est_cpx
+                    debug_plot_state['line_lem_true_td'] = line_lem_true_td
+                    debug_plot_state['line_lem_est_td'] = line_lem_est_td
+                else:
+                    # Update existing magnitude-response lines
+                    debug_plot_state['line_raw'].set_ydata(H_mag_db_log_np)
+                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_log_smoothed_np)
+                    debug_plot_state['line_desired'].set_ydata(desired_mag_db_log_np)
+                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_log_np)
+                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_log_smoothed_np)
+                    debug_plot_state['line_est_cpx'].set_ydata(H_est_cpx_mag_db_log_np)
+
+                    # Update time-domain IR comparison
+                    debug_plot_state['line_lem_true_td'].set_data(t_td_np, lem_true_td_np)
+                    debug_plot_state['line_lem_est_td'].set_data(t_td_np, lem_est_td_np)
+                    debug_plot_state['ax_td'].relim()
+                    debug_plot_state['ax_td'].autoscale_view()
+
+                debug_plot_state['fig'].canvas.draw()
+                debug_plot_state['fig'].canvas.flush_events()
+            
+        case _:
+            loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
+            # TODO: compute validation error for TD loss as well
+
+    buffers = (EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error)
+
+    return loss, buffers
