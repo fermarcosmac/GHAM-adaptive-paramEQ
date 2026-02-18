@@ -1,4 +1,4 @@
-import json, itertools, random, sys, math, torch, torchaudio
+import json, itertools, random, sys, math, torch, torchaudio, warnings
 from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root))
@@ -591,7 +591,7 @@ def get_compensation_EQ_params(rir: np.ndarray, sr: int, ROI: Tuple[float, float
     target_resp, pfit, pdb = _get_target_response_comp_EQ(cf, oa, ROI)
 
     # Log the optimization start
-    print(f"\nStarting initial EQ optimization with {num_sections} filters over ROI {ROI[0]}-{ROI[1]} Hz...")
+    print(f"\Starting initial EQ optimization with {num_sections} filters over ROI {ROI[0]}-{ROI[1]} Hz...")
 
     # Optimize parametric EQ to match target response
     EQ_params, out_resp_db, filt_resp_db = _eq_optimizer(
@@ -604,17 +604,17 @@ def get_compensation_EQ_params(rir: np.ndarray, sr: int, ROI: Tuple[float, float
     )
 
     # Optional: plot results and save figure
-    plt.figure()
-    plt.semilogx(freqs, 20*np.log10(freq_response + 1e-12), label="RIR Frequency Response")
-    plt.semilogx(cf, 20*np.log10(oa + 1e-12), label="Octave-Averaged Response")
-    plt.semilogx(cf, target_resp, label="Target Compensation Response", linestyle='--')
-    plt.semilogx(cf, out_resp_db, label="Equalized Response", linestyle='-.')
-    plt.semilogx(cf, filt_resp_db, label="EQ Filter Response", linestyle=':')
-    plt.axvline(ROI[0], color="red", linestyle="--", label="ROI Limits" if ROI else "")
-    plt.axvline(ROI[1], color="red", linestyle="--" if ROI else "")
-    plt.legend(), plt.xlabel("Frequency (Hz)"), plt.ylabel("Magnitude (dB)")
-    plt.title("Room Frequency Response and Target Compensation EQ")
-    plt.savefig("RFR_compensation.png",dpi=150, bbox_inches='tight')
+    #plt.figure()
+    #plt.semilogx(freqs, 20*np.log10(freq_response + 1e-12), label="RIR Frequency Response")
+    #plt.semilogx(cf, 20*np.log10(oa + 1e-12), label="Octave-Averaged Response")
+    #plt.semilogx(cf, target_resp, label="Target Compensation Response", linestyle='--')
+    #plt.semilogx(cf, out_resp_db, label="Equalized Response", linestyle='-.')
+    #plt.semilogx(cf, filt_resp_db, label="EQ Filter Response", linestyle=':')
+    #plt.axvline(ROI[0], color="red", linestyle="--", label="ROI Limits" if ROI else "")
+    #plt.axvline(ROI[1], color="red", linestyle="--" if ROI else "")
+    #plt.legend(), plt.xlabel("Frequency (Hz)"), plt.ylabel("Magnitude (dB)")
+    #plt.title("Room Frequency Response and Target Compensation EQ")
+    #plt.savefig("RFR_compensation.png",dpi=150, bbox_inches='tight')
 
     # Build parameter dictionary for downstream use (e.g., PyTorch EQ)
     eq_param_dict = _six_biquad_eq_params_to_dict(EQ_params)
@@ -1152,7 +1152,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     forget_factor = sim_cfg["forget_factor"]
     eps_0 = sim_cfg["eps_0"]
     use_true_LEM = sim_cfg["use_true_LEM"]
-    debug_plot_state = sim_cfg["debug_plot"]
+    debug_plot_flag = sim_cfg["debug_plot"]
+    debug_plot_state = {} if debug_plot_flag else None
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -1204,7 +1205,6 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
         
         input, audio_sr = torchaudio.load(audio_path)
-        input = input.to(device)
         
         if input.shape[0] > 1:
             input = input.mean(dim=0) # convert to mono
@@ -1215,6 +1215,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             resampler = torchaudio.transforms.Resample(orig_freq=audio_sr, new_freq=sr)
             input = resampler(input)
             print(f"Resampled audio from {audio_sr} Hz to {sr} Hz")
+        
+        input = input.to(device)
         
         if max_audio_len_s is not None:
             max_samples = int(max_audio_len_s * sr)
@@ -1270,14 +1272,15 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
     # Convert linear-phase desired response to minimum phase (minimize group delay) and add desired delay
     h_linear_np = target_response.squeeze().cpu().numpy()
-    h_minphase_np = minimum_phase(h_linear_np, method='homomorphic', half=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore",category=RuntimeWarning)
+        h_minphase_np = minimum_phase(h_linear_np, method="homomorphic", half=False)
     delay_zeros = torch.zeros(total_delay, device=device)
     h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
     target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
 
     # Precompute desired output
     desired_output = torchaudio.functional.fftconvolve(input, target_response, mode="full")
-    print(f"Precomputed desired output (type: {target_response_type})")
     
     # Initialize loss & loss history
     match loss_type:
@@ -1312,7 +1315,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     #####################
 
     n_frames = (T - frame_len) // hop_len + 1
-    for k in tqdm(range(n_frames), desc="Processing", unit="frame"):
+    for k in tqdm(range(n_frames), desc="ARE Simulation", unit="frame"):
 
         start_idx = k * hop_len
         current_time_s = start_idx / sr
@@ -1436,8 +1439,18 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         samples_to_store = end_idx - start_idx
         y_control[:, :, start_idx:end_idx] += LEM_out_buffer[:, :, :samples_to_store]
 
-    # TODO: CONTINUE HERE...
-    pass
+    # Build results dictionary and return it to main experiment
+    # Time axis in seconds for validation error samples
+    time_axis_val = np.arange(len(validation_error_history)) * (hop_len / sr)
+
+    result = {
+        "validation_error_history": np.array(validation_error_history, dtype=float),
+        "time_axis": time_axis_val,
+        "transition_times": transition_times_s if n_rirs > 1 else None,
+        "optim_type": optim_type,
+        "transition_time_s": sim_cfg["transition_time_s"],
+    }
+    return result
 
 
 def params_to_loss(EQ_params,

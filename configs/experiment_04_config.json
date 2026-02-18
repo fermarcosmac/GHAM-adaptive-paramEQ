@@ -5,14 +5,14 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["GHAM-1"],
-    "mu_opt": [0.002],
+    "optim_type": ["SGD","GHAM-1","GHAM-3"],
+    "mu_opt": [0.02],
     "loss_type": ["FD-MSE"],
-    "eps_0": [1.0],
+    "eps_0": [2.0],
     "target_response_type": ["delay_and_mag"],
     "n_rirs": [5],
     "transition_time_s": [1.0, 5.0],
-    "use_true_LEM": [true],
+    "use_true_LEM": [false],
     "debug_plot": [false]
   },
   "input": {

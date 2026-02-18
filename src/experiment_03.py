@@ -1,4 +1,4 @@
-import sys, math
+import sys, math, warnings
 from pathlib import Path
 from unittest import case
 import numpy as np
@@ -857,16 +857,16 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "metal_flute.mp3"             # "white_noise" or filename in data/audio/input/
-    max_audio_len_s = 15.0*16                  # None = full length
+    max_audio_len_s = 60.0                     # None = full length
 
     # Simulation configuration
-    ROI = [100.0, 16000.0]                      # region of interest for EQ compensation (Hz)
+    ROI = [100.0, 14000.0]                      # region of interest for EQ compensation (Hz)
     frame_len = 2048*4                          # Length (samples) of processing buffers
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-1"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
-    mu_opt = 2e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    optim_type = "GHAM-3"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    mu_opt = 2e-2                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
     eps_0 = 2.0                                 # Irreducible error floor
     target_response_type = "delay_and_mag"      # "delay_and_mag", "delay_only"
@@ -1010,7 +1010,7 @@ if __name__ == "__main__":
     
     # Convert linear-phase desired response to minimum phase (minimize group delay) and add desired delay
     h_linear_np = target_response.squeeze().cpu().numpy()
-    h_minphase_np = minimum_phase(h_linear_np, method='homomorphic', half=False)
+    h_minphase_np = minimum_phase(h_linear_np, method="homomorphic", half=False)
     delay_zeros = torch.zeros(total_delay, device=device)
     h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
     target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
