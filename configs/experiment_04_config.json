@@ -1,0 +1,24 @@
+{
+  "simulation_params": {
+    "ROI": [[100.0, 16000.0]],
+    "frame_len": [8192],
+    "hop_len": [8192],
+    "window_type": [null],
+    "forget_factor": [0.05],
+    "optim_type": ["GHAM-1"],
+    "mu_opt": [0.002],
+    "loss_type": ["FD-MSE"],
+    "eps_0": [1.0],
+    "target_response_type": ["delay_and_mag"],
+    "n_rirs": [5],
+    "transition_time_s": [1.0, 5.0],
+    "use_true_LEM": [true],
+    "debug_plot": [false]
+  },
+  "input": {
+    "use_white_noise": true,
+    "use_songs_folder": true,
+    "max_num_songs": 2,
+    "max_audio_len_s": [60.0]
+  }
+}
