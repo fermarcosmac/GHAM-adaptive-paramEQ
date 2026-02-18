@@ -410,7 +410,6 @@ class LEMConv(torch.autograd.Function):
     
 
 
-
 def _movmean_1d(x: torch.Tensor, L_before: int, L_after: int) -> torch.Tensor:
     """1D moving average with asymmetric window.
 
@@ -436,7 +435,6 @@ def _movmean_1d(x: torch.Tensor, L_before: int, L_after: int) -> torch.Tensor:
     seg_sum = cumsum[right + 1] - cumsum[left]
     count = (right - left + 1).to(x.dtype)
     return seg_sum / count
-
 
 
 
@@ -497,7 +495,6 @@ def kirkeby_deconvolve(x, y, nfft, sr, ROI):
     H = (Y * X.conj_physical()) / denom
 
     return H
-
 
 
 
@@ -844,6 +841,7 @@ def torchmin_closure():
         ROI
     )
     return loss
+
 
 
 #%% MAIN SCRIPT

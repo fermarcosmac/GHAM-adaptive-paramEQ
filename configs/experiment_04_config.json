@@ -1,6 +1,6 @@
 {
   "simulation_params": {
-    "ROI": [[100.0, 16000.0]],
+    "ROI": [[100.0, 14000.0]],
     "frame_len": [8192],
     "hop_len": [8192],
     "window_type": [null],
