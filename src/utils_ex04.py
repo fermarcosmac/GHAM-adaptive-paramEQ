@@ -1124,12 +1124,7 @@ def discover_input_signals(input_cfg: Dict[str, Any]) -> List[Tuple[str, Dict[st
 
 
 def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[str, Any]]) -> None:
-    """Placeholder for the actual control experiment from experiment_03.
-
-    This will eventually:
-      - Load / generate the input signal (white noise or song)
-      - Configure the simulation according to sim_cfg
-      - Run the adaptive controller and log/save results
+    """ Code to run the ARE experiment given the configuration and inpput specifications
     """
     mode, info = input_spec
     print("\n=== Running control experiment ===")
@@ -1305,7 +1300,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     LEM_out_len = frame_len + LEM.shape[-1] - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)        # buffer for soundsystem output
     est_mag_response_buffer = torch.zeros(1,1,frame_len, device=device) # buffer for estimated soundsystem response
-    est_cpx_response_buffer = torch.fft.rfft(target_response,n=2*frame_len-1)       # buffer for estimated complex soundsystem response
+    # buffer for estimated complex soundsystem response (store real/imag parts as real tensor)
+    init_cpx = torch.fft.rfft(target_response, n=2*frame_len-1)
+    est_cpx_response_buffer = torch.view_as_real(init_cpx).view(1, 1, -1, 2)
     EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
     rir_idx = 0                                                         # response index (adaptive scenarios)
     
@@ -1483,7 +1480,9 @@ def params_to_loss(EQ_params,
     if use_true_LEM:
         LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass
     else:
-        LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+        # est_cpx_response_buffer stores real/imag parts as a real tensor; reconstruct complex spectrum
+        LEM_H_est = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+        LEM_est = torch.fft.irfft(LEM_H_est, n=2*frame_len-1).view(1, 1, -1).detach()
     LEM_out = LEMConv.apply(
         EQ_out_buffer[:, :, :frame_len],
         LEM.view(1, 1, -1),
@@ -1579,7 +1578,9 @@ def process_buffers(EQ_params,
     if use_true_LEM:
         LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass
     else:
-        LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+        # est_cpx_response_buffer stores real/imag parts as a real tensor; reconstruct complex spectrum
+        LEM_H_est = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+        LEM_est = torch.fft.irfft(LEM_H_est, n=2*frame_len-1).view(1, 1, -1).detach()
     LEM_out = LEMConv.apply(
         EQ_out_buffer[:, :, :frame_len],
         LEM.view(1, 1, -1),
@@ -1609,8 +1610,9 @@ def process_buffers(EQ_params,
         forget_factor_loss = forget_factor
         forget_factor_cpx = forget_factor
     
-    # TODO: Update buffered complex response
-    est_cpx_response_buffer = (1-forget_factor_cpx)*est_cpx_response_buffer + forget_factor_cpx*LEM_H_est.view(1,1,-1).detach()
+    # Update buffered complex response (stored as real/imag pairs)
+    LEM_H_est_ri = torch.view_as_real(LEM_H_est).view(1, 1, -1, 2)
+    est_cpx_response_buffer = (1-forget_factor_cpx)*est_cpx_response_buffer + forget_factor_cpx*LEM_H_est_ri.detach()
 
     # Use LEM output to compute loss and update EQ parameters
     match loss_type:
@@ -1635,8 +1637,8 @@ def process_buffers(EQ_params,
             desired_mag_db_roi = desired_mag_db[roi_mask]
 
             # ROI-limited running complex estimate magnitude (from est_cpx_response_buffer)
-            H_est_cpx = est_cpx_response_buffer.squeeze()
-            H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx) + eps)
+            H_est_cpx_complex = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+            H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx_complex) + eps)
             H_est_cpx_mag_db_roi = H_est_cpx_mag_db[roi_mask]
 
             # Resample to log-frequency axis for perceptually-uniform processing
