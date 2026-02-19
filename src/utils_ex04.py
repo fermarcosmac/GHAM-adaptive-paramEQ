@@ -591,7 +591,7 @@ def get_compensation_EQ_params(rir: np.ndarray, sr: int, ROI: Tuple[float, float
     target_resp, pfit, pdb = _get_target_response_comp_EQ(cf, oa, ROI)
 
     # Log the optimization start
-    print(f"\Starting initial EQ optimization with {num_sections} filters over ROI {ROI[0]}-{ROI[1]} Hz...")
+    print(f"Starting initial EQ optimization with {num_sections} filters over ROI {ROI[0]}-{ROI[1]} Hz...")
 
     # Optimize parametric EQ to match target response
     EQ_params, out_resp_db, filt_resp_db = _eq_optimizer(
@@ -864,9 +864,17 @@ def kirkeby_deconvolve(x, y, nfft, sr, ROI):
         # Frequency-dependent epsilon (from MATLAB implementation)
         epsilon = torch.maximum(1e-4 * mflat, 0.38 * mflat - Xflat_smooth)
 
-    # Apply Kirkeby-style deconvolution filter with frequency-dependent epsilon
-    denom = X * X.conj_physical() + epsilon.to(X.dtype)
-    H = (Y * X.conj_physical()) / denom
+    # Apply Kirkeby-style deconvolution filter with frequency-dependent epsilon.
+    # Suppress functorch's performance warning about missing batching rule for aten::_conj_physical,
+    # which otherwise clutters the console.
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message="There is a performance drop because we have not yet implemented the batching rule for aten::_conj_physical",
+            category=UserWarning,
+        )
+        denom = X * X.conj_physical() + epsilon.to(X.dtype)
+        H = (Y * X.conj_physical()) / denom
 
     return H
 

@@ -41,35 +41,63 @@ def main() -> None:
     curves = defaultdict(list)  # key: (tt, optim_type) -> list of (time_axis, val_hist)
     tt_transitions = {}         # key: tt -> transition_times list (seconds)
 
-    # Enumerate all combinations of simulation parameters
-    for combo_idx, sim_cfg in enumerate(iter_param_grid(sim_param_grid)):
-        print("\n############################################")
-        print(f"Combination {combo_idx + 1}")
-        print("Simulation config:")
-        for k, v in sorted(sim_cfg.items()):
-            print(f"  {k}: {v}")
-        print("############################################")
+    # Pair optim_type and mu_opt
+    optim_list = sim_param_grid.get("optim_type", [])
+    mu_list = sim_param_grid.get("mu_opt", [])
 
-        # For each parameter combo, run over all selected input signals
-        results_per_probe = []
-        for input_spec in input_signals:
-            result = run_control_experiment(sim_cfg, input_spec)
-            if result is None:
-                continue
-            results_per_probe.append(result)
+    if optim_list and mu_list and len(optim_list) != len(mu_list):
+        raise ValueError(
+            "Length mismatch between 'optim_type' and 'mu_opt' in config: "
+            f"got {len(optim_list)} optimizers and {len(mu_list)} mu_opt values. "
+            "They must have the same length so each optimizer pairs with one mu_opt."
+        )
 
-            tt = result.get("transition_time_s", sim_cfg.get("transition_time_s"))
-            optim = result.get("optim_type", sim_cfg.get("optim_type"))
-            time_axis = np.asarray(result["time_axis"], dtype=float)
-            val_hist = np.asarray(result["validation_error_history"], dtype=float)
+    # All other parameters still form a full grid
+    base_param_grid = {
+        k: v for k, v in sim_param_grid.items() if k not in ("optim_type", "mu_opt")
+    }
 
-            curves[(tt, optim)].append((time_axis, val_hist))
+    combo_idx = 0
+    for base_cfg in iter_param_grid(base_param_grid):
 
-            # Cache transition start/end times per transition_time_s (in seconds)
-            if tt not in tt_transitions:
-                tt_transitions[tt] = result.get("transition_times", None)
+        if optim_list and mu_list:
+            opt_mu_pairs = zip(optim_list, mu_list)
 
-        # end for input_spec
+        for optim, mu in opt_mu_pairs:
+            sim_cfg = dict(base_cfg)
+            if optim is not None:
+                sim_cfg["optim_type"] = optim
+            if mu is not None:
+                sim_cfg["mu_opt"] = mu
+
+            combo_idx += 1
+            print("\n############################################")
+            print(f"Combination {combo_idx}")
+            print("Simulation config:")
+            for k, v in sorted(sim_cfg.items()):
+                print(f"  {k}: {v}")
+            print("############################################")
+
+            # For each parameter combo, run over all selected input signals
+            results_per_probe = []
+            for input_spec in input_signals:
+                result = run_control_experiment(sim_cfg, input_spec)
+                if result is None:
+                    continue
+                results_per_probe.append(result)
+
+                tt = result.get("transition_time_s", sim_cfg.get("transition_time_s"))
+                optim_used = result.get("optim_type", sim_cfg.get("optim_type"))
+                time_axis = np.asarray(result["time_axis"], dtype=float)
+                val_hist = np.asarray(result["validation_error_history"], dtype=float)
+
+                curves[(tt, optim_used)].append((time_axis, val_hist))
+
+                # Cache transition start/end times per transition_time_s (in seconds)
+                if tt not in tt_transitions:
+                    tt_transitions[tt] = result.get("transition_times", None)
+
+            # end for input_spec
 
     # After all runs, build the summary figure
     if unique_tt:
