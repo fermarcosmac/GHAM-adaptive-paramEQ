@@ -20,10 +20,18 @@
       0.05
     ],
     "optim_type": [
-      "SGD"
+      "SGD",
+      "GHAM-1",
+      "Adam",
+      "Newton",
+      "GHAM-3"
     ],
     "mu_opt": [
-      0.002
+      0.001,
+      0.001,
+      0.001,
+      0.01,
+      0.001
     ],
     "loss_type": [
       "FD-MSE"
@@ -38,7 +46,8 @@
       5
     ],
     "transition_time_s": [
-      1.0
+      1.0,
+      5.0
     ],
     "use_true_LEM": [
       false

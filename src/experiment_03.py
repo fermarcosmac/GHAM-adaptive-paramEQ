@@ -891,20 +891,20 @@ if __name__ == "__main__":
     # Set paths
     base = Path(".")
     rir_dir = base / "data" / "rir"
-    audio_input_dir = base / "data" / "audio" / "input"
+    audio_input_dir = base / "data" / "audio" / "input" / "songs"
 
     # Input configuration
-    input_type = "metal_flute.mp3"             # "white_noise" or filename in data/audio/input/
-    max_audio_len_s = 60.0                     # None = full length
+    input_type = "techno.mp3"             # "white_noise" or filename in data/audio/input/
+    max_audio_len_s = 60.0*2                     # None = full length
 
     # Simulation configuration
     ROI = [100.0, 14000.0]                      # region of interest for EQ compensation (Hz)
-    frame_len = 2048*4                          # Length (samples) of processing buffers
+    frame_len = 2048*2                          # Length (samples) of processing buffers
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "Newton"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
-    mu_opt = 2e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    optim_type = "SGD"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    mu_opt = 1e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
     eps_0 = 2.0                                 # Irreducible error floor
     target_response_type = "delay_and_mag"      # "delay_and_mag", "delay_only"
