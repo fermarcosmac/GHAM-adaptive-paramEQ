@@ -380,8 +380,11 @@ class LEMConv(torch.autograd.Function):
     - backward: uses estimated LEM impulse response (h_est) via FFT-based convolution
     """
 
+    # Let PyTorch generate a vmap rule for forward-mode AD
+    generate_vmap_rule = True
+
     @staticmethod
-    def forward(ctx, x, h_true, h_est):
+    def forward(x, h_true, h_est):
         """Forward pass using true LEM impulse response.
 
         Args:
@@ -389,12 +392,20 @@ class LEMConv(torch.autograd.Function):
             h_true: (1, 1, M) true LEM IR (no grad)
             h_est:  (1, 1, M) estimated LEM IR used only for gradients
         """
+        # Do not touch ctx here; functorch will call setup_context separately.
         y = torchaudio.functional.fftconvolve(x, h_true, mode="full")
+        return y
+
+    @staticmethod
+    def setup_context(ctx, inputs, output):
+        """Save context for backward in a functorch-compatible way."""
+        x, h_true, h_est = inputs
         ctx.save_for_backward(h_est)
         ctx.input_len = x.shape[-1]
-        #ctx.LEM_len = h_true.shape[-1]
         ctx.h_est_len = h_est.shape[-1]
-        return y
+        # Store true IR and input shape for jvp (forward-mode AD)
+        ctx.h_true = h_true
+        ctx.x_shape = x.shape
 
     @staticmethod
     def backward(ctx, grad_output):
@@ -407,6 +418,28 @@ class LEMConv(torch.autograd.Function):
         grad_x = grad_full[..., M-1:M-1+N]
 
         return grad_x, None, None
+
+    @staticmethod
+    def jvp(ctx, x_t, h_true_t, h_est_t):
+        """Jacobian-vector product for forward-mode AD.
+
+        Signature follows PyTorch docs: jvp(ctx, *grad_inputs) -> *grad_outputs,
+        where grad_inputs are tangents for each primal input.
+
+        We treat only x as differentiable; h_true and h_est are constants.
+        """
+        # Use stored primals from setup_context
+        h_true = ctx.h_true
+
+        # Materialize missing tangent as zeros if needed
+        if x_t is None:
+            x_t = torch.zeros(ctx.x_shape, device=h_true.device, dtype=h_true.dtype)
+
+        # Tangent output: d/dx conv(x, h_true)[x_t] = conv(x_t, h_true)
+        y_t = torchaudio.functional.fftconvolve(x_t, h_true, mode="full")
+
+        # No gradients w.r.t. h_true or h_est
+        return y_t
     
 
 
@@ -528,7 +561,9 @@ def params_to_loss(EQ_params,
     if use_true_LEM:
         LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass
     else:
-        LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+        # est_cpx_response_buffer stores real/imag parts as a real tensor; reconstruct complex spectrum
+        LEM_H_est = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+        LEM_est = torch.fft.irfft(LEM_H_est, n=2*frame_len-1).view(1, 1, -1).detach()
     LEM_out = LEMConv.apply(
         EQ_out_buffer[:, :, :frame_len],
         LEM.view(1, 1, -1),
@@ -625,7 +660,9 @@ def process_buffers(EQ_params,
     if use_true_LEM:
         LEM_est = LEM.view(1, 1, -1).detach() # True response for backward pass
     else:
-        LEM_est = torch.fft.irfft(est_cpx_response_buffer.squeeze(), n=2*frame_len-1).view(1, 1, -1).detach()
+        # est_cpx_response_buffer stores real/imag parts as a real tensor; reconstruct complex spectrum
+        LEM_H_est = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+        LEM_est = torch.fft.irfft(LEM_H_est, n=2*frame_len-1).view(1, 1, -1).detach()
     LEM_out = LEMConv.apply(
         EQ_out_buffer[:, :, :frame_len],
         LEM.view(1, 1, -1),
@@ -655,8 +692,9 @@ def process_buffers(EQ_params,
         forget_factor_loss = forget_factor
         forget_factor_cpx = forget_factor
     
-    # TODO: Update buffered complex response
-    est_cpx_response_buffer = (1-forget_factor_cpx)*est_cpx_response_buffer + forget_factor_cpx*LEM_H_est.view(1,1,-1).detach()
+    # Update buffered complex response (stored as real/imag pairs)
+    LEM_H_est_ri = torch.view_as_real(LEM_H_est).view(1, 1, -1, 2)
+    est_cpx_response_buffer = (1-forget_factor_cpx)*est_cpx_response_buffer + forget_factor_cpx*LEM_H_est_ri.detach()
 
     # Use LEM output to compute loss and update EQ parameters
     match loss_type:
@@ -681,8 +719,8 @@ def process_buffers(EQ_params,
             desired_mag_db_roi = desired_mag_db[roi_mask]
 
             # ROI-limited running complex estimate magnitude (from est_cpx_response_buffer)
-            H_est_cpx = est_cpx_response_buffer.squeeze()
-            H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx) + eps)
+            H_est_cpx_complex = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+            H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx_complex) + eps)
             H_est_cpx_mag_db_roi = H_est_cpx_mag_db[roi_mask]
 
             # Resample to log-frequency axis for perceptually-uniform processing
@@ -865,8 +903,8 @@ if __name__ == "__main__":
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "GHAM-3"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
-    mu_opt = 2e-2                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
+    optim_type = "Newton"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    mu_opt = 2e-3                               # Learning rate for controller (*1e4  Adam) (*1e-2  SGD) (*1e0 GHAM-1)
     loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
     eps_0 = 2.0                                 # Irreducible error floor
     target_response_type = "delay_and_mag"      # "delay_and_mag", "delay_only"
@@ -1042,7 +1080,9 @@ if __name__ == "__main__":
     LEM_out_len = frame_len + LEM.shape[-1] - 1
     LEM_out_buffer = torch.zeros(1,1,LEM_out_len, device=device)        # buffer for soundsystem output
     est_mag_response_buffer = torch.zeros(1,1,frame_len, device=device) # buffer for estimated soundsystem response
-    est_cpx_response_buffer = torch.fft.rfft(target_response,n=2*frame_len-1)       # buffer for estimated complex soundsystem response
+    # buffer for estimated complex soundsystem response (store real/imag parts as real tensor)
+    init_cpx = torch.fft.rfft(target_response, n=2*frame_len-1)
+    est_cpx_response_buffer = torch.view_as_real(init_cpx).view(1, 1, -1, 2)
     EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
     rir_idx = 0                                                         # response index (adaptive scenarios)
     
