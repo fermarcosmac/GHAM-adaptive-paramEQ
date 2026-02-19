@@ -1,5 +1,7 @@
 from pathlib import Path
 from collections import defaultdict
+import json
+import pickle
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,6 +22,7 @@ def main() -> None:
     config_path = root / "configs" / "experiment_04_config.json"
     cfg = load_config(config_path)
 
+    experiment_name = cfg.get("experiment_name", "experiment_04")
     sim_param_grid = cfg.get("simulation_params", {})
     input_cfg = cfg.get("input", {})
 
@@ -40,6 +43,7 @@ def main() -> None:
     # Aggregate results per (transition_time_s, optim_type)
     curves = defaultdict(list)  # key: (tt, optim_type) -> list of (time_axis, val_hist)
     tt_transitions = {}         # key: tt -> transition_times list (seconds)
+    input_ids_used = set()      # input identifiers (paths or labels) actually used
 
     # Pair optim_type and mu_opt
     optim_list = sim_param_grid.get("optim_type", [])
@@ -84,6 +88,20 @@ def main() -> None:
                 result = run_control_experiment(sim_cfg, input_spec)
                 if result is None:
                     continue
+
+                # Track which input signals were used (audio file paths or white_noise label)
+                input_id = None
+                if isinstance(input_spec, (list, tuple)) and len(input_spec) == 2:
+                    mode, info = input_spec
+                    if mode == "white_noise":
+                        input_id = "white_noise"
+                    elif isinstance(info, dict) and "path" in info:
+                        input_id = str(info["path"])
+                    else:
+                        input_id = str(mode)
+                else:
+                    input_id = str(input_spec)
+                input_ids_used.add(str(input_id))
                 results_per_probe.append(result)
 
                 tt = result.get("transition_time_s", sim_cfg.get("transition_time_s"))
@@ -96,75 +114,29 @@ def main() -> None:
                 # Cache transition start/end times per transition_time_s (in seconds)
                 if tt not in tt_transitions:
                     tt_transitions[tt] = result.get("transition_times", None)
-
             # end for input_spec
 
-    # After all runs, build the summary figure
-    if unique_tt:
-        fig, axes = plt.subplots(len(unique_tt), 1, figsize=(8, 3 * len(unique_tt)), sharex=False)
-        if len(unique_tt) == 1:
-            axes = [axes]
+    # After all runs, serialize configuration and plotting data to results folder
+    results_root = root / "results" / experiment_name
+    results_root.mkdir(parents=True, exist_ok=True)
 
-        # Assign a color per optimizer
-        optim_types = sorted({opt for (_, opt) in curves.keys()})
-        color_map = plt.get_cmap("tab10")
-        optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
+    # Save a copy of the configuration used for this experiment
+    config_out_path = results_root / "config.json"
+    with config_out_path.open("w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
 
-        for idx, tt in enumerate(unique_tt):
-            ax = axes[idx]
-            ax.set_title(f"transition_time_s = {tt}")
-            ax.set_ylabel("Validation error")
-            ax.grid(True, alpha=0.3)
+    # Save plotting data (curves, transition times, and input signals) for later visualization
+    plot1_data = {
+        "curves": curves,
+        "tt_transitions": tt_transitions,
+        "input_signals": sorted(input_ids_used),
+    }
+    plot_out_path = results_root / "plot1_data.pkl"
+    with plot_out_path.open("wb") as f:
+        pickle.dump(plot1_data, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-            # Plot vertical lines for transitions (if available)
-            transitions = tt_transitions.get(tt, None)
-            if transitions is not None:
-                for t_start, t_end in transitions:
-                    if t_start == t_end:
-                        ax.axvline(x=t_start, color="red", linestyle="--", linewidth=1.0, alpha=0.8)
-                    else:
-                        ax.axvline(x=t_start, color="green", linestyle="--", linewidth=1.0, alpha=0.8)
-                        ax.axvline(x=t_end, color="red", linestyle="--", linewidth=1.0, alpha=0.8)
-
-            # For each optimizer, overlay individual curves and their average
-            for optim in optim_types:
-                key = (tt, optim)
-                if key not in curves:
-                    continue
-
-                series = curves[key]
-                color = optim_to_color[optim]
-
-                # Plot individual probe curves (dimmed)
-                min_len = min(len(v[1]) for v in series)
-                all_vals = []
-                common_time = None
-                for time_axis, val_hist in series:
-                    t = time_axis[:min_len]
-                    v = val_hist[:min_len]
-                    ax.plot(t, v, color=color, alpha=0.2, linewidth=0.8)
-                    all_vals.append(v)
-                    if common_time is None:
-                        common_time = t
-
-                # Plot average curve (highlighted)
-                if all_vals and common_time is not None:
-                    avg_vals = np.mean(np.stack(all_vals, axis=0), axis=0)
-                    ax.plot(common_time, avg_vals, color=color, alpha=0.95, linewidth=2.0, label=f"{optim}")
-
-            if idx == len(unique_tt) - 1:
-                ax.set_xlabel("Time (s)")
-
-        # Add legend only once, in the last axis
-        if len(axes) > 0:
-            handles, labels = axes[-1].get_legend_handles_labels()
-            if handles:
-                axes[-1].legend(handles, labels, loc="upper right")
-
-        plt.tight_layout()
-        plt.show()
-
-        pass
+    print(f"Saved config to: {config_out_path}")
+    print(f"Saved plotting data to: {plot_out_path}")
 
 
 if __name__ == "__main__":
