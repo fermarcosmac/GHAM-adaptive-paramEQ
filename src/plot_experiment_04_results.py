@@ -2,9 +2,18 @@ import json
 import pickle
 from pathlib import Path
 
+import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 
+# Use LaTeX-style mathtext for figure text and numbers
+mpl.rcParams.update(
+    {
+        "font.family": "serif",
+        "mathtext.fontset": "cm",
+        "axes.formatter.use_mathtext": True,
+    }
+)
 
 def load_results(experiment_name: str, root: Path) -> tuple[dict, dict]:
     results_root = root / "results" / experiment_name
@@ -65,24 +74,27 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
     for idx, tt in enumerate(unique_tt):
         ax = axes[idx]
-        ax.set_title(f"transition_time_s = {tt}")
-        ax.set_ylabel("Validation error")
-        ax.grid(True, alpha=0.3)
+        ax.set_title(rf"$\mathrm{{Transition\ times:}}\ {tt}\ \mathrm{{s}}$")
+        ax.set_ylabel(r"$\mathrm{Validation\ error}$")
 
         # Reference line at y=1
         ax.axhline(y=1.0, color="dimgray", linestyle="--", linewidth=1.0, alpha=0.6)
 
-        # Plot vertical lines for transitions (if available)
+        # Plot vertical lines and shaded regions for transitions (if available)
         transitions = tt_transitions.get(tt, None)
         if transitions is not None:
             for t_start, t_end in transitions:
                 if t_start == t_end:
-                    ax.axvline(x=t_start, color="red", linestyle="--", linewidth=1.0, alpha=0.8)
+                    # Instantaneous transition: single dark gray dashed line
+                    ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
                 else:
-                    ax.axvline(x=t_start, color="green", linestyle="--", linewidth=1.0, alpha=0.8)
-                    ax.axvline(x=t_end, color="red", linestyle="--", linewidth=1.0, alpha=0.8)
+                    # Start/end of transition: two dark gray dashed lines
+                    ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                    ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                    # Dim shading over the transition zone
+                    ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
 
-        # For each optimizer, overlay individual curves and their average
+        # For each optimizer, plot only the average curve with periodic std bars
         for optim in optim_types:
             key = (tt, optim)
             if key not in curves:
@@ -91,31 +103,55 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             series = curves[key]
             color = optim_to_color[optim]
 
-            # Plot individual probe curves (dimmed)
+            # Stack all probe curves to compute mean and std over probes
             min_len = min(len(v[1]) for v in series)
             all_vals = []
             common_time = None
             for time_axis, val_hist in series:
                 t = time_axis[:min_len]
                 v = val_hist[:min_len]
-                ax.plot(t, v, color=color, alpha=0.2, linewidth=0.8)
                 all_vals.append(v)
                 if common_time is None:
                     common_time = t
 
-            # Plot average curve (highlighted)
             if all_vals and common_time is not None:
-                avg_vals = np.mean(np.stack(all_vals, axis=0), axis=0)
-                ax.plot(common_time, avg_vals, color=color, alpha=0.95, linewidth=2.0, label=f"{optim}")
+                vals_stack = np.stack(all_vals, axis=0)
+                avg_vals = np.mean(vals_stack, axis=0)
+                std_vals = np.std(vals_stack, axis=0)
+
+                # Plot average curve (thinner line) with plain-text legend label
+                optim_label = optim.replace("_", " ")
+                ax.plot(
+                    common_time,
+                    avg_vals,
+                    color=color,
+                    alpha=0.95,
+                    linewidth=1.0,
+                    label=optim_label,
+                )
+
+                # Add std bars at a sp5arser subset of points along the time axis
+                num_markers = min(10, len(common_time))
+                idxs = np.linspace(0, len(common_time) - 1, num=num_markers, dtype=int)
+                ax.errorbar(
+                    common_time[idxs],
+                    avg_vals[idxs],
+                    yerr=std_vals[idxs],
+                    fmt="none",
+                    ecolor=color,
+                    elinewidth=1.0,
+                    capsize=3,
+                    alpha=0.7,
+                )
 
         if idx == len(unique_tt) - 1:
-            ax.set_xlabel("Time (s)")
+            ax.set_xlabel(r"Time [s]")
 
-    # Add legend only once, in the last axis
+    # Add legend only once, in the top axis
     if len(axes) > 0:
-        handles, labels = axes[-1].get_legend_handles_labels()
+        handles, labels = axes[0].get_legend_handles_labels()
         if handles:
-            axes[-1].legend(handles, labels, loc="upper right")
+            axes[0].legend(handles, labels, loc="upper right")
 
     plt.tight_layout()
     plt.show()
