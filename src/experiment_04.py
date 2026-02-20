@@ -44,6 +44,7 @@ def main() -> None:
     curves = defaultdict(list)  # key: (tt, optim_type) -> list of (time_axis, val_hist)
     tt_transitions = {}         # key: tt -> transition_times list (seconds)
     input_ids_used = set()      # input identifiers (paths or labels) actually used
+    checkpoint_examples = {}    # optim_type -> list of checkpoint states from a representative run
 
     # Pair optim_type and mu_opt
     optim_list = sim_param_grid.get("optim_type", [])
@@ -61,8 +62,13 @@ def main() -> None:
         k: v for k, v in sim_param_grid.items() if k not in ("optim_type", "mu_opt")
     }
 
+    # Pre-compute total number of parameter combinations for logging
+    base_cfgs = list(iter_param_grid(base_param_grid))
+    num_opt_mu = len(optim_list) if (optim_list and mu_list) else 0
+    total_combos = len(base_cfgs) * max(1, num_opt_mu)
+
     combo_idx = 0
-    for base_cfg in iter_param_grid(base_param_grid):
+    for base_cfg in base_cfgs:
 
         if optim_list and mu_list:
             opt_mu_pairs = zip(optim_list, mu_list)
@@ -76,7 +82,10 @@ def main() -> None:
 
             combo_idx += 1
             print("\n############################################")
-            print(f"Combination {combo_idx}")
+            if total_combos > 0:
+                print(f"Combination {combo_idx}/{total_combos}")
+            else:
+                print(f"Combination {combo_idx}")
             print("Simulation config:")
             for k, v in sorted(sim_cfg.items()):
                 print(f"  {k}: {v}")
@@ -114,6 +123,10 @@ def main() -> None:
                 # Cache transition start/end times per transition_time_s (in seconds)
                 if tt not in tt_transitions:
                     tt_transitions[tt] = result.get("transition_times", None)
+
+                # Store one set of checkpoint examples per optimizer (first occurrence)
+                if "checkpoints" in result and optim_used not in checkpoint_examples:
+                    checkpoint_examples[optim_used] = result["checkpoints"]
             # end for input_spec
 
     # After all runs, serialize configuration and plotting data to results folder
@@ -125,11 +138,12 @@ def main() -> None:
     with config_out_path.open("w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
-    # Save plotting data (curves, transition times, and input signals) for later visualization
+    # Save plotting data (curves, transition times, input signals, and checkpoint examples) for later visualization
     plot1_data = {
         "curves": curves,
         "tt_transitions": tt_transitions,
         "input_signals": sorted(input_ids_used),
+        "checkpoint_examples": checkpoint_examples,
     }
     plot_out_path = results_root / "plot1_data.pkl"
     with plot_out_path.open("wb") as f:

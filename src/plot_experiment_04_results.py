@@ -38,6 +38,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
     curves = plot1_data["curves"]
     tt_transitions = plot1_data.get("tt_transitions", {})
     input_signals = plot1_data.get("input_signals", None)
+    checkpoint_examples = plot1_data.get("checkpoint_examples", {})
 
     # curves keys are (transition_time_s, optim_type)
     unique_tt = sorted({tt for (tt, _) in curves.keys()})
@@ -155,6 +156,70 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
     plt.tight_layout()
     plt.show()
+
+    # ------------------------------------------------------------------
+    # Checkpoint-based response tiles: one example run per optimizer
+    # ------------------------------------------------------------------
+    if checkpoint_examples:
+        optim_keys = sorted(checkpoint_examples.keys())
+        # Number of checkpoints per optimizer (assume consistent within each list)
+        n_rows = len(optim_keys)
+        n_cols = max(len(checkpoint_examples[opt]) for opt in optim_keys)
+
+        fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows), sharex=True, sharey=True)
+        if n_rows == 1:
+            axes2 = np.array([axes2])
+        if n_cols == 1:
+            axes2 = axes2[:, np.newaxis]
+
+        for row, opt in enumerate(optim_keys):
+            checkpoints = checkpoint_examples[opt]
+            color_total = "tab:blue"
+            color_lem = "tab:green"
+            color_desired = "tab:orange"
+
+            for col, cp in enumerate(checkpoints):
+                if col >= n_cols:
+                    break
+                ax = axes2[row, col]
+
+                freqs_log = np.asarray(cp["freqs_log"], dtype=float)
+                H_total = np.asarray(cp["H_total_db"], dtype=float)
+                H_desired = np.asarray(cp["H_desired_db"], dtype=float)
+                H_lem = np.asarray(cp["H_lem_db"], dtype=float)
+                t_s = float(cp.get("time_s", 0.0))
+
+                ax.plot(freqs_log, H_desired, color=color_desired, linewidth=1.0, alpha=0.9, label="Desired")
+                ax.plot(freqs_log, H_lem, color=color_lem, linewidth=0.8, alpha=0.9, label="LEM")
+                ax.plot(freqs_log, H_total, color=color_total, linewidth=1.0, alpha=0.9, label="EQ+LEM")
+
+                ax.set_xscale("log")
+                if row == 0:
+                    ax.set_title(f"t = {t_s:.1f} s")
+                if row == n_rows - 1:
+                    ax.set_xlabel("Frequency [Hz]")
+                if col == 0:
+                    ax.set_ylabel("Magnitude [dB]")
+
+                if row == 0 and col == 0:
+                    ax.legend(loc="best")
+
+        # Add optimizer names as text on the left of each row
+        for row, opt in enumerate(optim_keys):
+            label = opt.replace("_", " ")
+            axes2[row, 0].text(
+                0.02,
+                0.95,
+                label,
+                transform=axes2[row, 0].transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7),
+            )
+
+        plt.tight_layout()
+        plt.show()
 
 
 def main() -> None:

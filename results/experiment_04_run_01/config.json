@@ -21,16 +21,10 @@
     ],
     "optim_type": [
       "SGD",
-      "GHAM-1",
-      "Adam",
-      "Newton",
-      "GHAM-3"
+      "GHAM-1"
     ],
     "mu_opt": [
       0.001,
-      0.001,
-      0.001,
-      0.01,
       0.001
     ],
     "loss_type": [
@@ -44,6 +38,9 @@
     ],
     "n_rirs": [
       5
+    ],
+    "n_checkpoints": [
+      4
     ],
     "transition_time_s": [
       1.0,

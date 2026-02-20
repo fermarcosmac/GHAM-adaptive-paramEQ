@@ -1156,6 +1156,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     eps_0 = sim_cfg["eps_0"]
     use_true_LEM = sim_cfg["use_true_LEM"]
     debug_plot_flag = sim_cfg["debug_plot"]
+    n_checkpoints = sim_cfg.get("n_checkpoints", 0)
     debug_plot_state = {} if debug_plot_flag else None
 
     # Device selection
@@ -1320,6 +1321,16 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     #####################
 
     n_frames = (T - frame_len) // hop_len + 1
+
+    # Determine frame indices at which to record EQ/LEM/target state
+    checkpoint_states = []
+    if n_checkpoints and n_frames > 1:
+        # n_checkpoints + 2 points including first and last frame
+        raw_idxs = np.linspace(0, n_frames - 1, n_checkpoints + 2)
+        checkpoint_indices = sorted({int(round(i)) for i in raw_idxs})
+    else:
+        checkpoint_indices = [0, n_frames - 1] if n_frames > 0 else []
+
     for k in tqdm(range(n_frames), desc="ARE Simulation", unit="frame"):
 
         start_idx = k * hop_len
@@ -1334,6 +1345,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
         # Get target frame
         target_frame = desired_output[:, :, start_idx:start_idx + frame_len]
+
+        do_checkpoint = k in checkpoint_indices
+        checkpoint_state = {} if do_checkpoint else None
 
         loss, buffers = process_buffers(EQ_params,
             in_buffer,
@@ -1353,11 +1367,20 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             sr=sr,
             ROI=ROI,
             use_true_LEM=use_true_LEM,
-            debug_plot_state=debug_plot_state)
+            debug_plot_state=debug_plot_state,
+            checkpoint_state=checkpoint_state)
         EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error = buffers
 
         loss_history.append(torch.mean(loss).item())
         validation_error_history.append(validation_error.item())
+
+        # Collect checkpoint data for later visualization
+        if checkpoint_state is not None and loss_type in ("FD-MSE", "FD-SE"):
+            with torch.no_grad():
+                checkpoint_state["EQ_params"] = EQ_params.detach().cpu().numpy().astype(np.float32)
+                checkpoint_state["time_s"] = float(current_time_s)
+                checkpoint_state["frame_idx"] = int(k)
+            checkpoint_states.append(checkpoint_state)
 
         #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
 
@@ -1455,6 +1478,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         "optim_type": optim_type,
         "transition_time_s": sim_cfg["transition_time_s"],
     }
+    if checkpoint_states and loss_type in ("FD-MSE", "FD-SE"):
+        result["checkpoints"] = checkpoint_states
     return result
 
 
@@ -1573,7 +1598,8 @@ def process_buffers(EQ_params,
             sr=None,
             ROI=None,
             use_true_LEM=False,
-            debug_plot_state=None):
+            debug_plot_state=None,
+            checkpoint_state=None):
     # Process through EQ
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
 
@@ -1673,6 +1699,13 @@ def process_buffers(EQ_params,
             # Compute loss and validation error on log-frequency smoothed responses
             loss = loss_fcn(H_mag_db_log_smoothed, desired_mag_db_log_smoothed)
             validation_error = F.l1_loss(H_mag_db_log_smoothed, desired_mag_db_log_smoothed) / F.l1_loss(LEM_mag_db_log_smoothed, desired_mag_db_log_smoothed)
+
+            # Optionally capture checkpoint state for later visualization
+            if checkpoint_state is not None:
+                checkpoint_state["freqs_log"] = freqs_log.detach().cpu().numpy().astype(np.float32)
+                checkpoint_state["H_total_db"] = H_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
+                checkpoint_state["H_desired_db"] = desired_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
+                checkpoint_state["H_lem_db"] = LEM_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
 
             if debug_plot_state is not None:
                 # Convert frequency-domain data to numpy for plotting (log-frequency axis)
