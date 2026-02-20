@@ -2,6 +2,7 @@ from pathlib import Path
 from collections import defaultdict
 import json
 import pickle
+import random
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,11 +17,24 @@ from utils_ex04 import (
 
 root = Path(__file__).resolve().parent.parent
 
+
+def set_seed(seed: int) -> None:
+    """Seed Python, NumPy, and PyTorch (CPU/CUDA) for reproducible runs."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 def main() -> None:
 
     # Load configuration
     config_path = root / "configs" / "experiment_04_config.json"
     cfg = load_config(config_path)
+
+    # Global seeding for reproducibility (EQ init, white noise, song sampling)
+    seed = int(cfg.get("seed", 123))
 
     experiment_name = cfg.get("experiment_name", "experiment_04")
     sim_param_grid = cfg.get("simulation_params", {})
@@ -94,6 +108,7 @@ def main() -> None:
             # For each parameter combo, run over all selected input signals
             results_per_probe = []
             for input_spec in input_signals:
+                set_seed(seed) # Same initial params and noisy input
                 result = run_control_experiment(sim_cfg, input_spec)
                 if result is None:
                     continue
@@ -151,8 +166,5 @@ def main() -> None:
 
     print(f"Saved config to: {config_out_path}")
     print(f"Saved plotting data to: {plot_out_path}")
-
-
 if __name__ == "__main__":
-    torch.manual_seed(123)
     main()

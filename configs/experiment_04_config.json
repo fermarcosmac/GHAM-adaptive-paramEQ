@@ -21,6 +21,6 @@
     "use_white_noise": true,
     "use_songs_folder": true,
     "max_num_songs": 2,
-    "max_audio_len_s": [60.0]
+    "max_audio_len_s": [120.0]
   }
 }

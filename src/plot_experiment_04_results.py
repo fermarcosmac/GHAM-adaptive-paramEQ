@@ -6,6 +6,8 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 
+from utils_ex04 import compute_parametric_eq_response
+
 # Use LaTeX-style mathtext for figure text and numbers
 mpl.rcParams.update(
     {
@@ -155,7 +157,6 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             axes[0].legend(handles, labels, loc="upper right")
 
     plt.tight_layout()
-    plt.show()
 
     # ------------------------------------------------------------------
     # Checkpoint-based response tiles: one example run per optimizer
@@ -177,6 +178,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             color_total = "tab:blue"
             color_lem = "tab:green"
             color_desired = "tab:orange"
+            color_eq = "tab:red"
 
             for col, cp in enumerate(checkpoints):
                 if col >= n_cols:
@@ -187,11 +189,33 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                 H_total = np.asarray(cp["H_total_db"], dtype=float)
                 H_desired = np.asarray(cp["H_desired_db"], dtype=float)
                 H_lem = np.asarray(cp["H_lem_db"], dtype=float)
+
+                # Prefer denormalized EQ_matrix stored by the experiment. If not
+                # available (e.g., older results), fall back to reshaping the
+                # flattened normalized EQ_params.
+                eq_matrix = cp.get("EQ_matrix", None)
+                if eq_matrix is None:
+                    eq_params_flat = cp.get("EQ_params", None)
+                    if eq_params_flat is not None:
+                        eq_params_flat = np.asarray(eq_params_flat, dtype=float).ravel()
+                        if eq_params_flat.size % 3 == 0:
+                            n_filters = eq_params_flat.size // 3
+                            eq_matrix = eq_params_flat.reshape(n_filters, 3)
+                sr_cp = float(cp.get("sr", cfg.get("sample_rate", 48000)))
                 t_s = float(cp.get("time_s", 0.0))
 
                 ax.plot(freqs_log, H_desired, color=color_desired, linewidth=1.0, alpha=0.9, label="Desired")
                 ax.plot(freqs_log, H_lem, color=color_lem, linewidth=0.8, alpha=0.9, label="LEM")
                 ax.plot(freqs_log, H_total, color=color_total, linewidth=1.0, alpha=0.9, label="EQ+LEM")
+
+                # Overlay EQ-only frequency response if available
+                if eq_matrix is not None:
+                    eq_matrix_np = np.asarray(eq_matrix, dtype=float)
+                    try:
+                        H_eq_db = compute_parametric_eq_response(eq_matrix_np, freqs_log, sr_cp)
+                        ax.plot(freqs_log, H_eq_db, color=color_eq, linewidth=0.8, alpha=0.9, label="EQ")
+                    except Exception:
+                        pass
 
                 ax.set_xscale("log")
                 if row == 0:

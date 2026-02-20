@@ -1193,8 +1193,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
-    dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
-    _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
+    init_params_tensor = torch.rand(1,EQ.num_params)
+    #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
+    #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
     EQ_memory = 128+80 # TODO: hardcoded for now (should be greater than 0)
 
@@ -1377,9 +1378,59 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         # Collect checkpoint data for later visualization
         if checkpoint_state is not None and loss_type in ("FD-MSE", "FD-SE"):
             with torch.no_grad():
+                # Store flattened EQ parameters (normalized vector), time, frame index, and sample rate
                 checkpoint_state["EQ_params"] = EQ_params.detach().cpu().numpy().astype(np.float32)
                 checkpoint_state["time_s"] = float(current_time_s)
                 checkpoint_state["frame_idx"] = int(k)
+                checkpoint_state["sr"] = int(sr)
+
+                # Additionally store a denormalized (6, 3) EQ parameter matrix for
+                # direct use with compute_parametric_eq_response. This keeps the
+                # heavier denormalization work inside the experiment loop, so the
+                # plotting script can operate on real-world units (gain/Q/Fc).
+                try:
+                    # EQ_params is shape (num_params,) -> make it (1, num_params)
+                    eq_param_tensor = EQ_params.detach().view(1, -1)
+                    param_dict_norm = EQ.extract_param_dict(eq_param_tensor)
+                    param_dict_denorm = EQ.denormalize_param_dict(param_dict_norm)
+
+                    def _scalar(name: str) -> float:
+                        return float(param_dict_denorm[name].view(-1)[0].cpu().item())
+
+                    eq_matrix = np.zeros((6, 3), dtype=np.float32)
+
+                    # Low shelf
+                    eq_matrix[0, 0] = _scalar("low_shelf_gain_db")
+                    eq_matrix[0, 1] = _scalar("low_shelf_q_factor")
+                    eq_matrix[0, 2] = _scalar("low_shelf_cutoff_freq")
+
+                    # Bands 0-3
+                    eq_matrix[1, 0] = _scalar("band0_gain_db")
+                    eq_matrix[1, 1] = _scalar("band0_q_factor")
+                    eq_matrix[1, 2] = _scalar("band0_cutoff_freq")
+
+                    eq_matrix[2, 0] = _scalar("band1_gain_db")
+                    eq_matrix[2, 1] = _scalar("band1_q_factor")
+                    eq_matrix[2, 2] = _scalar("band1_cutoff_freq")
+
+                    eq_matrix[3, 0] = _scalar("band2_gain_db")
+                    eq_matrix[3, 1] = _scalar("band2_q_factor")
+                    eq_matrix[3, 2] = _scalar("band2_cutoff_freq")
+
+                    eq_matrix[4, 0] = _scalar("band3_gain_db")
+                    eq_matrix[4, 1] = _scalar("band3_q_factor")
+                    eq_matrix[4, 2] = _scalar("band3_cutoff_freq")
+
+                    # High shelf
+                    eq_matrix[5, 0] = _scalar("high_shelf_gain_db")
+                    eq_matrix[5, 1] = _scalar("high_shelf_q_factor")
+                    eq_matrix[5, 2] = _scalar("high_shelf_cutoff_freq")
+
+                    checkpoint_state["EQ_matrix"] = eq_matrix
+                except Exception:
+                    # If anything goes wrong, skip EQ_matrix for this checkpoint
+                    pass
+
             checkpoint_states.append(checkpoint_state)
 
         #frame_analysis_plot(in_buffer, EQ_out_buffer[:,:,:frame_len], LEM_out_buffer[:, :, :frame_len], target_frame, frame_idx=k)
