@@ -1523,10 +1523,11 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         y_control[:, :, start_idx:end_idx] += LEM_out_buffer[:, :, :samples_to_store]
 
     # Build results dictionary and return it to main experiment
-    # Time axis in seconds for validation error samples
+    # Time axis in seconds for loss/validation samples
     time_axis_val = np.arange(len(validation_error_history)) * (hop_len / sr)
 
     result = {
+        "loss_history": np.array(loss_history, dtype=float),
         "validation_error_history": np.array(validation_error_history, dtype=float),
         "time_axis": time_axis_val,
         "transition_times": transition_times_s if n_rirs > 1 else None,

@@ -56,7 +56,8 @@ def main() -> None:
     tt_to_idx = {tt: i for i, tt in enumerate(unique_tt)}
 
     # Aggregate results per (transition_time_s, optim_type)
-    curves = defaultdict(list)  # key: (tt, optim_type) -> list of (time_axis, val_hist)
+    curves = defaultdict(list)       # key: (tt, optim_type) -> list of (time_axis, val_hist)
+    loss_curves = defaultdict(list)  # key: (tt, optim_type) -> list of (time_axis, loss_hist)
     tt_transitions = {}         # key: tt -> transition_times list (seconds)
     input_ids_used = set()      # input identifiers (paths or labels) actually used
     checkpoint_examples = {}    # optim_type -> list of checkpoint states from a representative run
@@ -133,8 +134,11 @@ def main() -> None:
                 optim_used = result.get("optim_type", sim_cfg.get("optim_type"))
                 time_axis = np.asarray(result["time_axis"], dtype=float)
                 val_hist = np.asarray(result["validation_error_history"], dtype=float)
+                loss_hist = np.asarray(result.get("loss_history", []), dtype=float)
 
                 curves[(tt, optim_used)].append((time_axis, val_hist))
+                if loss_hist.size:
+                    loss_curves[(tt, optim_used)].append((time_axis, loss_hist))
 
                 # Cache transition start/end times per transition_time_s (in seconds)
                 if tt not in tt_transitions:
@@ -154,9 +158,10 @@ def main() -> None:
     with config_out_path.open("w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
 
-    # Save plotting data (curves, transition times, input signals, and checkpoint examples) for later visualization
+    # Save plotting data (curves, loss_curves, transition times, input signals, and checkpoint examples) for later visualization
     plot1_data = {
         "curves": curves,
+        "loss_curves": loss_curves,
         "tt_transitions": tt_transitions,
         "input_signals": sorted(input_ids_used),
         "checkpoint_examples": checkpoint_examples,

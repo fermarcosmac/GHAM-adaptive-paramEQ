@@ -20,16 +20,16 @@
       0.05
     ],
     "optim_type": [
-      "Newton"
+      "SGD"
     ],
     "mu_opt": [
       1
     ],
     "lambda_newton": [
-      10000.0
+      0.001
     ],
     "loss_type": [
-      "FD-MSE"
+      "TD-MSE"
     ],
     "eps_0": [
       2.0

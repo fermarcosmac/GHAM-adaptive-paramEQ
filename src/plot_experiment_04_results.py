@@ -37,7 +37,8 @@ def load_results(experiment_name: str, root: Path) -> tuple[dict, dict]:
 
 
 def plot_results(cfg: dict, plot1_data: dict) -> None:
-    curves = plot1_data["curves"]
+    curves = plot1_data["curves"]              # validation error curves
+    loss_curves = plot1_data.get("loss_curves", {})  # training loss curves (optional)
     tt_transitions = plot1_data.get("tt_transitions", {})
     input_signals = plot1_data.get("input_signals", None)
     checkpoint_examples = plot1_data.get("checkpoint_examples", {})
@@ -157,6 +158,93 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             axes[0].legend(handles, labels, loc="upper right")
 
     plt.tight_layout()
+
+    # ------------------------------------------------------------------
+    # Training loss vs. time (separate figure, same style as validation)
+    # ------------------------------------------------------------------
+    if loss_curves:
+        unique_tt_loss = sorted({tt for (tt, _) in loss_curves.keys()})
+        fig_loss, axes_loss = plt.subplots(len(unique_tt_loss), 1, figsize=(8, 3 * len(unique_tt_loss)), sharex=False)
+        if len(unique_tt_loss) == 1:
+            axes_loss = [axes_loss]
+
+        for idx, tt in enumerate(unique_tt_loss):
+            ax = axes_loss[idx]
+            # Match LaTeX-style formatting used in validation-error plots
+            ax.set_title(rf"$\mathrm{{Transition\ times:}}\ {tt}\ \mathrm{{s}}$ (Loss)")
+            ax.set_ylabel(r"$\mathrm{Loss}$")
+
+            # Reference line at y=0
+            ax.axhline(y=0.0, color="dimgray", linestyle="--", linewidth=1.0, alpha=0.6)
+
+            # Plot vertical lines and shaded regions for transitions (if available)
+            transitions = tt_transitions.get(tt, None)
+            if transitions is not None:
+                for t_start, t_end in transitions:
+                    if t_start == t_end:
+                        ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                    else:
+                        ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                        ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                        ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
+
+            # For each optimizer, plot only the average curve with periodic std bars
+            for optim in optim_types:
+                key = (tt, optim)
+                if key not in loss_curves:
+                    continue
+
+                series = loss_curves[key]
+                color = optim_to_color[optim]
+
+                min_len = min(len(v[1]) for v in series)
+                all_vals = []
+                common_time = None
+                for time_axis, loss_hist in series:
+                    t = time_axis[:min_len]
+                    v = loss_hist[:min_len]
+                    all_vals.append(v)
+                    if common_time is None:
+                        common_time = t
+
+                if all_vals and common_time is not None:
+                    vals_stack = np.stack(all_vals, axis=0)
+                    avg_vals = np.mean(vals_stack, axis=0)
+                    std_vals = np.std(vals_stack, axis=0)
+
+                    optim_label = optim.replace("_", " ")
+                    ax.plot(
+                        common_time,
+                        avg_vals,
+                        color=color,
+                        alpha=0.95,
+                        linewidth=1.0,
+                        label=optim_label,
+                    )
+
+                    num_markers = min(10, len(common_time))
+                    idxs = np.linspace(0, len(common_time) - 1, num=num_markers, dtype=int)
+                    ax.errorbar(
+                        common_time[idxs],
+                        avg_vals[idxs],
+                        yerr=std_vals[idxs],
+                        fmt="none",
+                        ecolor=color,
+                        elinewidth=1.0,
+                        capsize=3,
+                        alpha=0.7,
+                    )
+
+            if idx == len(unique_tt_loss) - 1:
+                ax.set_xlabel(r"Time [s]")
+
+        # Legend on top axis only
+        if len(axes_loss) > 0:
+            handles_l, labels_l = axes_loss[0].get_legend_handles_labels()
+            if handles_l:
+                axes_loss[0].legend(handles_l, labels_l, loc="upper right")
+
+        plt.tight_layout()
 
     # ------------------------------------------------------------------
     # Checkpoint-based response tiles: one example run per optimizer
