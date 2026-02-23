@@ -873,8 +873,8 @@ def kirkeby_deconvolve(x, y, nfft, sr, ROI):
             message="There is a performance drop because we have not yet implemented the batching rule for aten::_conj_physical",
             category=UserWarning,
         )
-        denom = X * X.conj_physical() + epsilon.to(X.dtype)
-        H = (Y * X.conj_physical()) / denom
+        denom = X * torch.conj(X) + epsilon.to(X.dtype)
+        H = (Y * torch.conj(X)) / denom
 
     return H
 
@@ -1149,6 +1149,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     loss_type = sim_cfg["loss_type"]
     optim_type = sim_cfg["optim_type"]
     mu_opt = sim_cfg["mu_opt"]
+    lambda_newton = sim_cfg.get("lambda_newton", 0.0)
     target_response_type = sim_cfg["target_response_type"]
     frame_len = sim_cfg["frame_len"]
     hop_len = sim_cfg["hop_len"]
@@ -1466,14 +1467,17 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
-                # Log Hessian condition number
-                hess_cond_history.append(torch.linalg.cond(hess.detach().cpu().float()).item())
+                # Regularize Hessian: H_reg = H + lambda_newton * I
+                dim = hess.shape[-1]
+                I = torch.eye(dim, device=hess.device, dtype=hess.dtype)
+                hess_reg = hess + lambda_newton * I
+
+                # Log condition number of the regularized Hessian
+                hess_cond_history.append(torch.linalg.cond(hess_reg.detach().cpu().float()).item())
                 
                 with torch.no_grad():
                     jac = jac.view(-1,1)
-                    update = lstsq(hess, jac).solution        # (num_params, 1)
-                    #ridge_regressor.fit(hess,jac)
-                    #update_ridge = ridge_regressor.w           # (num_params, 1)
+                    update = lstsq(hess_reg, jac).solution        # (num_params, 1)
                     EQ_params -= mu_opt * update.view_as(EQ_params)
 
             case "GHAM-3" | "GHAM-4":

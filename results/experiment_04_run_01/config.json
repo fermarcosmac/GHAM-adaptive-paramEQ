@@ -20,13 +20,16 @@
       0.05
     ],
     "optim_type": [
-      "SGD"
+      "Newton"
     ],
     "mu_opt": [
-      0.0001
+      1
+    ],
+    "lambda_newton": [
+      10000.0
     ],
     "loss_type": [
-      "TD-MSE"
+      "FD-MSE"
     ],
     "eps_0": [
       2.0
@@ -54,7 +57,7 @@
   "input": {
     "use_white_noise": true,
     "use_songs_folder": false,
-    "max_num_songs": 3,
+    "max_num_songs": 1,
     "max_audio_len_s": [
       120.0
     ]

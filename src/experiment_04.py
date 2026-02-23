@@ -35,6 +35,7 @@ def main() -> None:
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
     seed = int(cfg.get("seed", 123))
+    set_seed(seed)
 
     experiment_name = cfg.get("experiment_name", "experiment_04")
     sim_param_grid = cfg.get("simulation_params", {})
