@@ -243,7 +243,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             )
 
         plt.tight_layout()
-        plt.show()
+    plt.show()
 
 
 def main() -> None:

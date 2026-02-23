@@ -1197,7 +1197,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
-    EQ_memory = 128+80 # TODO: hardcoded for now (should be greater than 0)
+    EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
@@ -1376,7 +1376,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         validation_error_history.append(validation_error.item())
 
         # Collect checkpoint data for later visualization
-        if checkpoint_state is not None and loss_type in ("FD-MSE", "FD-SE"):
+        if checkpoint_state is not None:
             with torch.no_grad():
                 # Store flattened EQ parameters (normalized vector), time, frame index, and sample rate
                 checkpoint_state["EQ_params"] = EQ_params.detach().cpu().numpy().astype(np.float32)
@@ -1529,7 +1529,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         "optim_type": optim_type,
         "transition_time_s": sim_cfg["transition_time_s"],
     }
-    if checkpoint_states and loss_type in ("FD-MSE", "FD-SE"):
+    if checkpoint_states:
         result["checkpoints"] = checkpoint_states
     return result
 
@@ -1700,149 +1700,143 @@ def process_buffers(EQ_params,
     est_cpx_response_buffer = (1-forget_factor_cpx)*est_cpx_response_buffer + forget_factor_cpx*LEM_H_est_ri.detach()
 
     # Use LEM output to compute loss and update EQ parameters
+    # Compute full soundsystem (EQ+LEM) frequency response
+    H_SS = kirkeby_deconvolve(in_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
+
+    # Compute magnitude responses
+    H_mag_db_current = 20*torch.log10(torch.abs(H_SS) + eps)
+    H_mag_db = (forget_factor_loss)*H_mag_db_current + (1-forget_factor_loss)*est_mag_response_buffer.squeeze()
+    est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
+    desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+    LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
+    LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
+
+    # ROI-limited responses (keep as tensors)
+    freqs_roi = freqs[roi_mask]
+    H_mag_db_roi = H_mag_db[roi_mask]
+    H_mag_db_current_roi = H_mag_db_current[roi_mask]
+    LEM_mag_db_roi = LEM_mag_db[roi_mask]
+    desired_mag_db_roi = desired_mag_db[roi_mask]
+
+    # ROI-limited running complex estimate magnitude (from est_cpx_response_buffer)
+    H_est_cpx_complex = torch.view_as_complex(est_cpx_response_buffer.squeeze())
+    H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx_complex) + eps)
+    H_est_cpx_mag_db_roi = H_est_cpx_mag_db[roi_mask]
+
+    # Resample to log-frequency axis for perceptually-uniform processing
+    n_log_points = 256  # Number of log-spaced frequency points
+    H_mag_db_log, freqs_log = interp_to_log_freq(H_mag_db_roi, freqs_roi, n_points=n_log_points)
+    H_mag_db_current_log, _ = interp_to_log_freq(H_mag_db_current_roi, freqs_roi, n_points=n_log_points)
+    LEM_mag_db_log, _ = interp_to_log_freq(LEM_mag_db_roi, freqs_roi, n_points=n_log_points)
+    desired_mag_db_log, _ = interp_to_log_freq(desired_mag_db_roi, freqs_roi, n_points=n_log_points)
+    H_est_cpx_mag_db_log, _ = interp_to_log_freq(H_est_cpx_mag_db_roi, freqs_roi, n_points=n_log_points)
+
+    # Smooth on log-frequency axis using PyTorch conv1d (moving average)
+    # This gives more detail at low frequencies, less at high frequencies (perceptually uniform)
+    smooth_window = 15  # Kernel size (odd), smaller than before since we have fewer points
+    smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
+    padding = smooth_window // 2
+    H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+    H_mag_db_current_log_smoothed = F.conv1d(H_mag_db_current_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+    LEM_mag_db_log_smoothed = F.conv1d(LEM_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+    desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+
+    # Compute loss and validation error
     match loss_type:
         case "FD-MSE" | "FD-SE":
-
-            # Compute full soundsystem (EQ+LEM) frequency response
-            H_SS = kirkeby_deconvolve(in_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
-
-            # Compute magnitude responses
-            H_mag_db_current = 20*torch.log10(torch.abs(H_SS) + eps)
-            H_mag_db = (forget_factor_loss)*H_mag_db_current + (1-forget_factor_loss)*est_mag_response_buffer.squeeze()
-            est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
-            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
-            LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
-            LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
-
-            # ROI-limited responses (keep as tensors)
-            freqs_roi = freqs[roi_mask]
-            H_mag_db_roi = H_mag_db[roi_mask]
-            H_mag_db_current_roi = H_mag_db_current[roi_mask]
-            LEM_mag_db_roi = LEM_mag_db[roi_mask]
-            desired_mag_db_roi = desired_mag_db[roi_mask]
-
-            # ROI-limited running complex estimate magnitude (from est_cpx_response_buffer)
-            H_est_cpx_complex = torch.view_as_complex(est_cpx_response_buffer.squeeze())
-            H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx_complex) + eps)
-            H_est_cpx_mag_db_roi = H_est_cpx_mag_db[roi_mask]
-
-            # Resample to log-frequency axis for perceptually-uniform processing
-            n_log_points = 256  # Number of log-spaced frequency points
-            H_mag_db_log, freqs_log = interp_to_log_freq(H_mag_db_roi, freqs_roi, n_points=n_log_points)
-            H_mag_db_current_log, _ = interp_to_log_freq(H_mag_db_current_roi, freqs_roi, n_points=n_log_points)
-            LEM_mag_db_log, _ = interp_to_log_freq(LEM_mag_db_roi, freqs_roi, n_points=n_log_points)
-            desired_mag_db_log, _ = interp_to_log_freq(desired_mag_db_roi, freqs_roi, n_points=n_log_points)
-            H_est_cpx_mag_db_log, _ = interp_to_log_freq(H_est_cpx_mag_db_roi, freqs_roi, n_points=n_log_points)
-
-            # Smooth on log-frequency axis using PyTorch conv1d (moving average)
-            # This gives more detail at low frequencies, less at high frequencies (perceptually uniform)
-            smooth_window = 15  # Kernel size (odd), smaller than before since we have fewer points
-            smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
-            padding = smooth_window // 2
-            H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            H_mag_db_current_log_smoothed = F.conv1d(H_mag_db_current_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            LEM_mag_db_log_smoothed = F.conv1d(LEM_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-            desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-
-            # TODO: estimate and plot LEM magnitude response as well (currently just the true LEM response, which is not available in practice but serves as a reference)
-            # We'll use it later for gradient injection!
-
-            # Compute loss and validation error on log-frequency smoothed responses
             loss = loss_fcn(H_mag_db_log_smoothed, desired_mag_db_log_smoothed)
-            validation_error = F.l1_loss(H_mag_db_log_smoothed, desired_mag_db_log_smoothed) / F.l1_loss(LEM_mag_db_log_smoothed, desired_mag_db_log_smoothed)
-
-            # Optionally capture checkpoint state for later visualization
-            if checkpoint_state is not None:
-                checkpoint_state["freqs_log"] = freqs_log.detach().cpu().numpy().astype(np.float32)
-                checkpoint_state["H_total_db"] = H_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
-                checkpoint_state["H_desired_db"] = desired_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
-                checkpoint_state["H_lem_db"] = LEM_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
-
-            if debug_plot_state is not None:
-                # Convert frequency-domain data to numpy for plotting (log-frequency axis)
-                freqs_log_np = freqs_log.detach().cpu().numpy()
-                H_mag_db_log_np = H_mag_db_log.detach().cpu().numpy()
-                H_mag_db_log_smoothed_np = H_mag_db_log_smoothed.detach().cpu().numpy()
-                LEM_mag_db_log_np = LEM_mag_db_log.detach().cpu().numpy()
-                LEM_mag_db_log_smoothed_np = LEM_mag_db_log_smoothed.detach().cpu().numpy()
-                desired_mag_db_log_np = desired_mag_db_log.detach().cpu().numpy()
-                H_est_cpx_mag_db_log_np = H_est_cpx_mag_db_log.detach().cpu().numpy()
-
-                # Time-domain true vs estimated LEM responses
-                lem_true_td = LEM.squeeze()
-                lem_est_td = LEM_est.squeeze()
-                min_len_td = min(lem_true_td.numel(), lem_est_td.numel())
-                if min_len_td > 0:
-                    lem_true_td_np = lem_true_td[:min_len_td].detach().cpu().numpy()
-                    lem_est_td_np = lem_est_td[:min_len_td].detach().cpu().numpy()
-                    t_td_np = np.arange(min_len_td)
-                else:
-                    lem_true_td_np = np.array([])
-                    lem_est_td_np = np.array([])
-                    t_td_np = np.array([])
-
-                # Initialize plot on first call
-                if debug_plot_state.get('fig') is None:
-                    plt.ion()  # Enable interactive mode
-                    fig, (ax_mag, ax_td) = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
-
-                    # Top subplot: magnitude responses (log-frequency)
-                    line_raw, = ax_mag.plot(freqs_log_np, H_mag_db_log_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
-                    line_smooth, = ax_mag.plot(freqs_log_np, H_mag_db_log_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
-                    line_desired, = ax_mag.plot(freqs_log_np, desired_mag_db_log_np, linewidth=1, label='Desired H(f)', color='tab:orange')
-                    line_lem_raw, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
-                    line_lem_smooth, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
-                    line_est_cpx, = ax_mag.plot(freqs_log_np, H_est_cpx_mag_db_log_np, linewidth=1.0, label='Estimated H_est(f) (from est_cpx)', color='tab:purple', alpha=0.8)
-                    ax_mag.set_xlabel("Frequency (Hz)")
-                    ax_mag.set_ylabel("Magnitude (dB)")
-                    ax_mag.set_xscale('log')
-                    ax_mag.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM (log-freq smoothing)")
-                    ax_mag.legend(loc='lower left')
-                    ax_mag.grid(True, alpha=0.3)
-                    ax_mag.set_ylim(-40, 30)  # Extended y-axis range for LEM
-
-                    # Bottom subplot: time-domain LEM IRs
-                    line_lem_true_td, = ax_td.plot(t_td_np, lem_true_td_np, linewidth=1.0, label='True LEM IR', color='tab:red')
-                    line_lem_est_td, = ax_td.plot(t_td_np, lem_est_td_np, linewidth=1.0, label='Estimated LEM_est IR', color='tab:purple', alpha=0.8)
-                    ax_td.set_xlabel("Sample")
-                    ax_td.set_ylabel("Amplitude")
-                    ax_td.set_title("Time-domain LEM Impulse Responses")
-                    ax_td.legend(loc='upper right')
-                    ax_td.grid(True, alpha=0.3)
-
-                    plt.tight_layout()
-                    debug_plot_state['fig'] = fig
-                    debug_plot_state['ax_mag'] = ax_mag
-                    debug_plot_state['ax_td'] = ax_td
-                    debug_plot_state['line_raw'] = line_raw
-                    debug_plot_state['line_smooth'] = line_smooth
-                    debug_plot_state['line_desired'] = line_desired
-                    debug_plot_state['line_lem_raw'] = line_lem_raw
-                    debug_plot_state['line_lem_smooth'] = line_lem_smooth
-                    debug_plot_state['line_est_cpx'] = line_est_cpx
-                    debug_plot_state['line_lem_true_td'] = line_lem_true_td
-                    debug_plot_state['line_lem_est_td'] = line_lem_est_td
-                else:
-                    # Update existing magnitude-response lines
-                    debug_plot_state['line_raw'].set_ydata(H_mag_db_log_np)
-                    debug_plot_state['line_smooth'].set_ydata(H_mag_db_log_smoothed_np)
-                    debug_plot_state['line_desired'].set_ydata(desired_mag_db_log_np)
-                    debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_log_np)
-                    debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_log_smoothed_np)
-                    debug_plot_state['line_est_cpx'].set_ydata(H_est_cpx_mag_db_log_np)
-
-                    # Update time-domain IR comparison
-                    debug_plot_state['line_lem_true_td'].set_data(t_td_np, lem_true_td_np)
-                    debug_plot_state['line_lem_est_td'].set_data(t_td_np, lem_est_td_np)
-                    debug_plot_state['ax_td'].relim()
-                    debug_plot_state['ax_td'].autoscale_view()
-
-                debug_plot_state['fig'].canvas.draw()
-                debug_plot_state['fig'].canvas.flush_events()
-            
         case _:
             loss = loss_fcn(LEM_out_buffer[:, :, :frame_len], target_frame)
-            # TODO: compute validation error for TD loss as well
+    validation_error = F.l1_loss(H_mag_db_log_smoothed, desired_mag_db_log_smoothed) / F.l1_loss(LEM_mag_db_log_smoothed, desired_mag_db_log_smoothed)
+
+    # Optionally capture checkpoint state for later visualization
+    if checkpoint_state is not None:
+        checkpoint_state["freqs_log"] = freqs_log.detach().cpu().numpy().astype(np.float32)
+        checkpoint_state["H_total_db"] = H_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
+        checkpoint_state["H_desired_db"] = desired_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
+        checkpoint_state["H_lem_db"] = LEM_mag_db_log_smoothed.detach().cpu().numpy().astype(np.float32)
+
+    if debug_plot_state is not None:
+        # Convert frequency-domain data to numpy for plotting (log-frequency axis)
+        freqs_log_np = freqs_log.detach().cpu().numpy()
+        H_mag_db_log_np = H_mag_db_log.detach().cpu().numpy()
+        H_mag_db_log_smoothed_np = H_mag_db_log_smoothed.detach().cpu().numpy()
+        LEM_mag_db_log_np = LEM_mag_db_log.detach().cpu().numpy()
+        LEM_mag_db_log_smoothed_np = LEM_mag_db_log_smoothed.detach().cpu().numpy()
+        desired_mag_db_log_np = desired_mag_db_log.detach().cpu().numpy()
+        H_est_cpx_mag_db_log_np = H_est_cpx_mag_db_log.detach().cpu().numpy()
+
+        # Time-domain true vs estimated LEM responses
+        lem_true_td = LEM.squeeze()
+        lem_est_td = LEM_est.squeeze()
+        min_len_td = min(lem_true_td.numel(), lem_est_td.numel())
+        if min_len_td > 0:
+            lem_true_td_np = lem_true_td[:min_len_td].detach().cpu().numpy()
+            lem_est_td_np = lem_est_td[:min_len_td].detach().cpu().numpy()
+            t_td_np = np.arange(min_len_td)
+        else:
+            lem_true_td_np = np.array([])
+            lem_est_td_np = np.array([])
+            t_td_np = np.array([])
+
+                # Initialize plot on first call
+        if debug_plot_state.get('fig') is None:
+            plt.ion()  # Enable interactive mode
+            fig, (ax_mag, ax_td) = plt.subplots(2, 1, figsize=(12, 8), sharex=False)
+
+            # Top subplot: magnitude responses (log-frequency)
+            line_raw, = ax_mag.plot(freqs_log_np, H_mag_db_log_np, linewidth=0.5, alpha=0.4, label='Actual H(f)', color='tab:blue')
+            line_smooth, = ax_mag.plot(freqs_log_np, H_mag_db_log_smoothed_np, linewidth=1.5, label='Actual H(f) (smoothed)', color='tab:blue')
+            line_desired, = ax_mag.plot(freqs_log_np, desired_mag_db_log_np, linewidth=1, label='Desired H(f)', color='tab:orange')
+            line_lem_raw, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_np, linewidth=0.5, alpha=0.4, label='LEM H(f)', color='tab:green')
+            line_lem_smooth, = ax_mag.plot(freqs_log_np, LEM_mag_db_log_smoothed_np, linewidth=1.5, label='LEM H(f) (smoothed)', color='tab:green')
+            line_est_cpx, = ax_mag.plot(freqs_log_np, H_est_cpx_mag_db_log_np, linewidth=1.0, label='Estimated H_est(f) (from est_cpx)', color='tab:purple', alpha=0.8)
+            ax_mag.set_xlabel("Frequency (Hz)")
+            ax_mag.set_ylabel("Magnitude (dB)")
+            ax_mag.set_xscale('log')
+            ax_mag.set_title("FD-MSE: Actual vs Desired Magnitude Response + LEM (log-freq smoothing)")
+            ax_mag.legend(loc='lower left')
+            ax_mag.grid(True, alpha=0.3)
+            ax_mag.set_ylim(-40, 30)  # Extended y-axis range for LEM
+
+            # Bottom subplot: time-domain LEM IRs
+            line_lem_true_td, = ax_td.plot(t_td_np, lem_true_td_np, linewidth=1.0, label='True LEM IR', color='tab:red')
+            line_lem_est_td, = ax_td.plot(t_td_np, lem_est_td_np, linewidth=1.0, label='Estimated LEM_est IR', color='tab:purple', alpha=0.8)
+            ax_td.set_xlabel("Sample")
+            ax_td.set_ylabel("Amplitude")
+            ax_td.set_title("Time-domain LEM Impulse Responses")
+            ax_td.legend(loc='upper right')
+            ax_td.grid(True, alpha=0.3)
+
+            plt.tight_layout()
+            debug_plot_state['fig'] = fig
+            debug_plot_state['ax_mag'] = ax_mag
+            debug_plot_state['ax_td'] = ax_td
+            debug_plot_state['line_raw'] = line_raw
+            debug_plot_state['line_smooth'] = line_smooth
+            debug_plot_state['line_desired'] = line_desired
+            debug_plot_state['line_lem_raw'] = line_lem_raw
+            debug_plot_state['line_lem_smooth'] = line_lem_smooth
+            debug_plot_state['line_est_cpx'] = line_est_cpx
+            debug_plot_state['line_lem_true_td'] = line_lem_true_td
+            debug_plot_state['line_lem_est_td'] = line_lem_est_td
+        else:
+            # Update existing magnitude-response lines
+            debug_plot_state['line_raw'].set_ydata(H_mag_db_log_np)
+            debug_plot_state['line_smooth'].set_ydata(H_mag_db_log_smoothed_np)
+            debug_plot_state['line_desired'].set_ydata(desired_mag_db_log_np)
+            debug_plot_state['line_lem_raw'].set_ydata(LEM_mag_db_log_np)
+            debug_plot_state['line_lem_smooth'].set_ydata(LEM_mag_db_log_smoothed_np)
+            debug_plot_state['line_est_cpx'].set_ydata(H_est_cpx_mag_db_log_np)
+
+            # Update time-domain IR comparison
+            debug_plot_state['line_lem_true_td'].set_data(t_td_np, lem_true_td_np)
+            debug_plot_state['line_lem_est_td'].set_data(t_td_np, lem_est_td_np)
+            debug_plot_state['ax_td'].relim()
+            debug_plot_state['ax_td'].autoscale_view()
+
+            debug_plot_state['fig'].canvas.draw()
+            debug_plot_state['fig'].canvas.flush_events()
 
     buffers = (EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error)
 

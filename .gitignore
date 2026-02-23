@@ -1,5 +1,7 @@
 # Ignore everything inside data/SoundCam
 data/SoundCam/*
+data/MedleyDB/*
 
 # Except this file
 !data/SoundCam/.gitkeep
+!data/MedleyDB/.gitkeep
