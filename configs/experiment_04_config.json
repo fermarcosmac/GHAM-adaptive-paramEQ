@@ -1,12 +1,13 @@
 {
   "experiment_name": "experiment_04_run_01",
+  "scenario": "moving_position",
   "simulation_params": {
-    "ROI": [[100.0, 14000.0]],
+    "ROI": [[50.0, 18000.0]],
     "frame_len": [8192],
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["GHAM-1"],
+    "optim_type": ["SGD"],
     "mu_opt": [1],
     "lambda_newton": [0.001],
     "loss_type": ["FD-MSE"],
