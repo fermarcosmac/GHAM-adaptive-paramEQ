@@ -20,7 +20,7 @@
       0.05
     ],
     "optim_type": [
-      "SGD"
+      "GHAM-1"
     ],
     "mu_opt": [
       1
@@ -29,10 +29,10 @@
       0.001
     ],
     "loss_type": [
-      "TD-MSE"
+      "FD-MSE"
     ],
     "eps_0": [
-      2.0
+      7.0
     ],
     "target_response_type": [
       "delay_and_mag"

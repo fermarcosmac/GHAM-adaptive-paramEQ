@@ -174,9 +174,6 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             ax.set_title(rf"$\mathrm{{Transition\ times:}}\ {tt}\ \mathrm{{s}}$ (Loss)")
             ax.set_ylabel(r"$\mathrm{Loss}$")
 
-            # Reference line at y=0
-            ax.axhline(y=0.0, color="dimgray", linestyle="--", linewidth=1.0, alpha=0.6)
-
             # Plot vertical lines and shaded regions for transitions (if available)
             transitions = tt_transitions.get(tt, None)
             if transitions is not None:
@@ -212,10 +209,13 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                     avg_vals = np.mean(vals_stack, axis=0)
                     std_vals = np.std(vals_stack, axis=0)
 
+                    # For log-scale plotting, avoid zeros/negatives
+                    avg_plot = np.clip(avg_vals, 1e-8, None)
+
                     optim_label = optim.replace("_", " ")
                     ax.plot(
                         common_time,
-                        avg_vals,
+                        avg_plot,
                         color=color,
                         alpha=0.95,
                         linewidth=1.0,
@@ -226,7 +226,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                     idxs = np.linspace(0, len(common_time) - 1, num=num_markers, dtype=int)
                     ax.errorbar(
                         common_time[idxs],
-                        avg_vals[idxs],
+                        avg_plot[idxs],
                         yerr=std_vals[idxs],
                         fmt="none",
                         ecolor=color,
@@ -234,6 +234,9 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                         capsize=3,
                         alpha=0.7,
                     )
+
+            # Use logarithmic y-axis for loss curves
+            ax.set_yscale("log")
 
             if idx == len(unique_tt_loss) - 1:
                 ax.set_xlabel(r"Time [s]")
