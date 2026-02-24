@@ -14,7 +14,7 @@ import torch.nn.functional as F
 from torch.func import jacrev, jacfwd
 from torch.linalg import lstsq
 from modules_ex04 import LEMConv
-from lib.local_dasp_pytorch.modules import ParametricEQ
+from lib.local_dasp_pytorch.modules import ParametricEQ, Gain
 from utils import (
     load_audio,
     load_rirs,
@@ -664,45 +664,55 @@ def build_target_response_lin_phase(sr: int, response_type: str = "delay_only",
         
         # Interpolate target magnitude response to FFT bins
         fft_freqs = np.fft.rfftfreq(fir_len, d=1.0/sr)
-        
-        # Interpolate target magnitude response (in dB) to FFT frequency bins
-        target_mag_interp_db = np.interp(fft_freqs, target_mag_freqs, target_mag_resp)
-        
-        # Apply ROI rolloff: attenuate frequencies outside the region of interest
-        # The target_mag_resp is kept as-is within ROI; decay starts exactly at ROI boundaries
+
+        # Build a log-spaced frequency axis with the same number of points as fft_freqs.
+        # DC (0 Hz) cannot be represented on a log scale, so log_freqs spans
+        # [fft_freqs[1], fft_freqs[-1]] — the first non-zero bin to Nyquist.
+        n_fft = len(fft_freqs)
+        f_min_log = fft_freqs[1]          # first non-zero FFT bin
+        f_max_log = fft_freqs[-1]         # Nyquist
+        log_freqs = np.logspace(np.log10(f_min_log), np.log10(f_max_log), n_fft)
+
+        # Interpolate target magnitude response (in dB) to log-spaced frequency axis
+        target_mag_interp_db = np.interp(log_freqs, target_mag_freqs, target_mag_resp)
+
+        # Apply ROI rolloff on the log-spaced frequency axis.
+        # The target_mag_resp is kept as-is within ROI; decay starts exactly at ROI boundaries.
         if ROI is not None:
             f_low, f_high = ROI
-            rolloff_mask_db = np.zeros_like(fft_freqs)
-            
+            rolloff_mask_db = np.zeros_like(log_freqs)
+
             # Low-frequency decay (below f_low)
             # Decay starts at f_low (0 dB) and reaches -120 dB at f_low_end
             f_low_end = f_low / (2 ** rolloff_octaves)
-            for i, f in enumerate(fft_freqs):
-                if f <= 0:
-                    rolloff_mask_db[i] = -120  # DC component heavily attenuated
-                elif f < f_low_end:
+            for i, f in enumerate(log_freqs):
+                if f < f_low_end:
                     rolloff_mask_db[i] = -120  # Full attenuation below rolloff end
                 elif f < f_low:
                     # Smooth cosine transition from 0 dB (at f_low) to -120 dB (at f_low_end)
                     # t=0 at f_low, t=1 at f_low_end
-                    t = np.log2(f_low / f) / rolloff_octaves  # 0 at f_low, 1 at f_low_end
+                    t = np.log2(f_low / f) / rolloff_octaves
                     rolloff_mask_db[i] = -120 * 0.5 * (1 - np.cos(np.pi * t))
-            
+
             # High-frequency decay (above f_high)
             # Decay starts at f_high (0 dB) and reaches -120 dB at f_high_end
             f_high_end = f_high * (2 ** rolloff_octaves)
-            for i, f in enumerate(fft_freqs):
+            for i, f in enumerate(log_freqs):
                 if f > f_high_end:
                     rolloff_mask_db[i] = -120  # Full attenuation above rolloff end
                 elif f > f_high:
                     # Smooth cosine transition from 0 dB (at f_high) to -120 dB (at f_high_end)
                     # t=0 at f_high, t=1 at f_high_end
-                    t = np.log2(f / f_high) / rolloff_octaves  # 0 at f_high, 1 at f_high_end
+                    t = np.log2(f / f_high) / rolloff_octaves
                     rolloff_mask_db[i] = -120 * 0.5 * (1 - np.cos(np.pi * t))
-            
-            # Apply rolloff mask to target magnitude
+
             target_mag_interp_db = target_mag_interp_db + rolloff_mask_db
-        
+
+        # Re-interpolate from log-spaced back to the linear FFT frequency axis (ready for IFFT).
+        # DC bin (0 Hz) is out of range of log_freqs, so np.interp clamps it to the
+        # value at log_freqs[0] (which is already heavily attenuated by the rolloff).
+        target_mag_interp_db = np.interp(fft_freqs, log_freqs, target_mag_interp_db)
+
         # Convert from dB to linear magnitude
         target_mag_interp_linear = 10 ** (target_mag_interp_db / 20.0)
         
@@ -1037,11 +1047,17 @@ def _unwrap_phase(phase: torch.Tensor) -> torch.Tensor:
 # Main experiment logic #
 #########################
 
-def load_rirs(rir_dir: Path, max_n: int = None) -> Tuple[List[np.ndarray], List[int]]:
+def load_rirs(rir_dir: Path, max_n: int = None, normalize: bool = False) -> Tuple[List[np.ndarray], List[int]]:
     """Load all wav files in a directory as float32 RIRs. Returns (rirs, srs).
 
     RIRs are returned as lists of 1-D numpy arrays. Sample rates are returned
     for each file so the caller can check/resample if needed.
+
+    Args:
+        rir_dir: Directory containing .wav RIR files.
+        max_n: If set, only the first max_n files (sorted) are loaded.
+        normalize: If True, all RIRs are divided by sum(|rir_0|), where rir_0
+                   is the first RIR in the returned list.
     """
     files = sorted([p for p in rir_dir.glob("*.wav")])
     if max_n is not None:
@@ -1053,12 +1069,12 @@ def load_rirs(rir_dir: Path, max_n: int = None) -> Tuple[List[np.ndarray], List[
         if data.ndim > 1:
             data = data.mean(axis=1)
         data = data.astype(np.float32)
-        # Normalize so that maximum absolute value is one
-        peak = np.max(np.abs(data))
-        if peak > 0:
-            data = data / peak
         rirs.append(data)
         srs.append(sr)
+    if normalize and len(rirs) > 0:
+        norm_factor = np.sum(np.abs(rirs[0]))
+        if norm_factor > 0:
+            rirs = [rir / norm_factor for rir in rirs]
     return rirs, srs
 
 
@@ -1165,7 +1181,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
     rir_dir = Path(sim_cfg.get("rir_dir", root / "data" / "rir"))
-    rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
+    rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs, normalize=False)
     rir_init = rirs[0]
     sr = rirs_srs[0]
     
@@ -1196,10 +1212,15 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
     init_params_tensor = torch.rand(1,EQ.num_params)
+    #init_params_tensor = torch.ones(1,EQ.num_params)*0.5
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
+
+    # Initialize learnable gain
+    G = Gain(sample_rate=sr)
+    G_param = torch.nn.Parameter(torch.tensor([[0.0]], device=device))  # start at unity gain (0 dB)
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
@@ -1240,12 +1261,12 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     # Set optimization (adaptive filtering)
     match optim_type:
         case "SGD":
-            optimizer = torch.optim.SGD([EQ_params], lr=mu_opt)
+            optimizer = torch.optim.SGD([EQ_params,G_param], lr=mu_opt)
         case "Adam":
-            optimizer = torch.optim.Adam([EQ_params], lr=mu_opt)
+            optimizer = torch.optim.Adam([EQ_params,G_param], lr=mu_opt)
         case "Muon":
             raise ValueError("Muon optimizer requires newer PyTorch version.")
-            optimizer = torch.optim.Muon([EQ_params], lr=mu_opt)
+            optimizer = torch.optim.Muon([EQ_params,G_param], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
@@ -1265,15 +1286,15 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
 
     # Build desired response: delay + optional target magnitude response
-    total_delay = lem_delay + 7  # TODO: add EQ group delay if necessary. Hardcoded for now!
+    total_delay = lem_delay  # TODO: add EQ group delay if necessary. Hardcoded for now!
     target_response = build_target_response_lin_phase(
         sr=sr,
         response_type=target_response_type,
         target_mag_resp=target_mag_resp,
         target_mag_freqs=target_mag_freqs,
-        fir_len=1024,
+        fir_len=8192,
         ROI=ROI,
-        rolloff_octaves=1.0,
+        rolloff_octaves=.5,
         device=device
     )
 
@@ -1285,6 +1306,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     delay_zeros = torch.zeros(total_delay, device=device)
     h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
     target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
+
+    # Normalize desired response
+    #target_response = target_response / target_response.abs().sum()  # match overall gain of initial RIR (since we're not optimizing gain in this experiment)
 
     # Precompute desired output
     desired_output = torchaudio.functional.fftconvolve(input, target_response, mode="full")

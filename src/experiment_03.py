@@ -887,11 +887,11 @@ if __name__ == "__main__":
 
     # Input configuration
     input_type = "white_noise"                 # "white_noise" or filename in data/audio/input/
-    max_audio_len_s = 60.0                     # None = full length
+    max_audio_len_s = 120.0                     # None = full length
 
     # Simulation configuration
-    ROI = [50.0, 18000.0]                      # region of interest for EQ compensation (Hz)
-    frame_len = 2048*2                          # Length (samples) of processing buffers
+    ROI = [50.0, 20000.0]                      # region of interest for EQ compensation (Hz)
+    frame_len = 2048*4                          # Length (samples) of processing buffers
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)

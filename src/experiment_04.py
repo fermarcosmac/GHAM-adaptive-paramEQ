@@ -65,6 +65,7 @@ def main() -> None:
 
     # Prepare aggregation structures for plotting
     # Unique transition times from the simulation grid
+    
     tt_values = sim_param_grid.get("transition_time_s", [])
     unique_tt = sorted(set(tt_values))
     tt_to_idx = {tt: i for i, tt in enumerate(unique_tt)}
