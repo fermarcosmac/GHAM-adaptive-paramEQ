@@ -41,6 +41,20 @@ def main() -> None:
     sim_param_grid = cfg.get("simulation_params", {})
     input_cfg = cfg.get("input", {})
 
+    # Resolve RIR directory from scenario config
+    scenario = cfg.get("scenario", "moving_position")
+    _rir_subdir_map = {
+        "moving_position": root / "data" / "rir" / "moving_position",
+        "moving_person":   root / "data" / "rir" / "moving_person",
+        "static":          root / "data" / "rir" / "moving_position",
+    }
+    if scenario not in _rir_subdir_map:
+        raise ValueError(
+            f"Unknown scenario '{scenario}'. Must be one of: {list(_rir_subdir_map)}"
+        )
+    rir_dir = _rir_subdir_map[scenario]
+    print(f"Scenario: '{scenario}' -> RIR dir: {rir_dir}")
+
     if not sim_param_grid:
         raise ValueError("No 'simulation_params' section found in config.")
 
@@ -95,6 +109,11 @@ def main() -> None:
                 sim_cfg["optim_type"] = optim
             if mu is not None:
                 sim_cfg["mu_opt"] = mu
+
+            # Inject resolved RIR directory; force n_rirs=1 for static scenario
+            sim_cfg["rir_dir"] = str(rir_dir)
+            if scenario == "static":
+                sim_cfg["n_rirs"] = 1
 
             combo_idx += 1
             print("\n############################################")

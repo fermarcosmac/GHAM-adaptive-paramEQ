@@ -883,7 +883,6 @@ if __name__ == "__main__":
 
     # Set paths
     base = Path(".")
-    rir_dir = base / "data" / "rir"
     audio_input_dir = base / "data" / "audio" / "input" / "songs"
 
     # Input configuration
@@ -891,21 +890,35 @@ if __name__ == "__main__":
     max_audio_len_s = 60.0                     # None = full length
 
     # Simulation configuration
-    ROI = [100.0, 14000.0]                      # region of interest for EQ compensation (Hz)
+    ROI = [50.0, 18000.0]                      # region of interest for EQ compensation (Hz)
     frame_len = 2048*2                          # Length (samples) of processing buffers
     hop_len = frame_len                         # Stride between frames
     window_type = None                          # "hann" or None
     forget_factor = 0.05                        # Forgetting factor for FD loss estimation (0=no memory, 1=full memory)
-    optim_type = "Newton"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
-    mu_opt = 1                                  # Learning rate for controller (*1e4 Adam) (*1e-2 SGD) (*1e0 GHAM-1)
+    optim_type = "SGD"                       # "SGD", "Adam", "GHAM-1", "GHAM-2", "Newton", "GHAM-3", "GHAM-4"
+    mu_opt = 1e-2                                  # Learning rate for controller (*1e4 Adam) (*1e-2 SGD) (*1e0 GHAM-1)
     lambda_newton = 1e4                        # Tikhonov regularization for Newton Hessian (H + lambda_newton * I)
     loss_type = "FD-MSE"                        # "TD-MSE", "FD-MSE", "TD-SE", "FD-SE"
     eps_0 = 2.0                                 # Irreducible error floor
     target_response_type = "delay_and_mag"      # "delay_and_mag", "delay_only"
-    n_rirs = 5                                  # Number of RIRs to simulate (1 = constant response)
+    scenario = "moving_position"                 # "moving_position", "moving_person", or "static"
+    n_rirs = 2                                  # Number of RIRs to simulate (1 = constant response)
     transition_time_s = 1.0                     # Transition duration in seconds (0 = abrupt switch)
     use_true_LEM = False                         # Use true LEM for backward pass (oracle, not practical but serves as a reference)
     debug_plot_state = None                       # Debug plot state (set to None to disable, or {} to enable)
+
+    # Resolve RIR directory from scenario
+    _rir_subdir_map = {
+        "moving_position": root / "data" / "rir" / "moving_position",
+        "moving_person":   root / "data" / "rir" / "moving_person",
+        "static":          root / "data" / "rir" / "moving_position",
+    }
+    if scenario not in _rir_subdir_map:
+        raise ValueError(f"Unknown scenario '{scenario}'. Must be one of: {list(_rir_subdir_map)}")
+    rir_dir = _rir_subdir_map[scenario]
+    if scenario == "static":
+        n_rirs = 1
+    print(f"Scenario: '{scenario}' -> RIR dir: {rir_dir}")
 
     # Device selection
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -942,10 +955,10 @@ if __name__ == "__main__":
 
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
-    #init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: sensitive to initial parameters
+    init_params_tensor = torch.rand(1,EQ.num_params) # random initialization: sensitive to initial parameters
     #init_params_tensor = torch.zeros(1,EQ.num_params) # zeros initialization
-    dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
-    _, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
+    #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
+    #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
 

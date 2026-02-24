@@ -1,5 +1,6 @@
 {
   "experiment_name": "experiment_04_run_01",
+  "scenario": "moving_position",
   "simulation_params": {
     "ROI": [
       [
@@ -17,10 +18,10 @@
       null
     ],
     "forget_factor": [
-      0.05
+      0.01
     ],
     "optim_type": [
-      "GHAM-1"
+      "SGD"
     ],
     "mu_opt": [
       1

@@ -1164,7 +1164,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Acoustic path from actuator (speaker) to sensor (microphone)
-    rirs, rirs_srs = load_rirs(root/'data'/'rir', max_n=n_rirs)
+    rir_dir = Path(sim_cfg.get("rir_dir", root / "data" / "rir"))
+    rirs, rirs_srs = load_rirs(rir_dir, max_n=n_rirs)
     rir_init = rirs[0]
     sr = rirs_srs[0]
     
