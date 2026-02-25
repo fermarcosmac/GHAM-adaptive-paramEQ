@@ -1295,7 +1295,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         response_type=target_response_type,
         target_mag_resp=target_mag_resp,
         target_mag_freqs=target_mag_freqs,
-        fir_len=8192,
+        fir_len=2048,
         ROI=ROI,
         rolloff_octaves=.5,
         device=device
@@ -1343,6 +1343,10 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     init_cpx = torch.fft.rfft(target_response, n=2*frame_len-1)
     est_cpx_response_buffer = torch.view_as_real(init_cpx).view(1, 1, -1, 2)
     rir_idx = 0                                                         # response index (adaptive scenarios)
+    # Non-EQ path buffers: raw input history and non-equalized LEM output
+    noEQ_in_buffer = torch.zeros(1, 1, EQ_out_len, device=device)       # mirror of EQ_out_buffer but without EQ
+    noEQ_out_buffer = torch.zeros(1, 1, LEM_out_len, device=device)     # LEM output for non-EQ path
+    y_noEQ = torch.zeros(1, 1, T, device=device)                        # accumulated non-EQ output audio
     
 
     #####################
@@ -1384,6 +1388,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             LEM_out_buffer,
             est_mag_response_buffer,
             est_cpx_response_buffer,
+            noEQ_in_buffer,
+            noEQ_out_buffer,
             EQ,
             G,
             LEM,
@@ -1399,7 +1405,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             use_true_LEM=use_true_LEM,
             debug_plot_state=debug_plot_state,
             checkpoint_state=checkpoint_state)
-        EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error = buffers
+        EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error, noEQ_in_buffer, noEQ_out_buffer = buffers
 
         loss_history.append(torch.mean(loss).item())
         validation_error_history.append(validation_error.item())
@@ -1545,14 +1551,24 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             LEM_out_buffer = LEM_out_buffer.detach()
             est_mag_response_buffer = est_mag_response_buffer.detach()
             est_cpx_response_buffer = est_cpx_response_buffer.detach()
+            noEQ_in_buffer = noEQ_in_buffer.detach()
+            noEQ_out_buffer = noEQ_out_buffer.detach()
         # Store output frame (only store hop_len new samples to handle overlap-add)
         end_idx = min(start_idx + frame_len, T)
         samples_to_store = end_idx - start_idx
         y_control[:, :, start_idx:end_idx] += LEM_out_buffer[:, :, :samples_to_store]
+        y_noEQ[:, :, start_idx:end_idx] += noEQ_out_buffer[:, :, :samples_to_store]
 
     # Build results dictionary and return it to main experiment
     # Time axis in seconds for loss/validation samples
     time_axis_val = np.arange(len(validation_error_history)) * (hop_len / sr)
+
+    # Persist audio outputs as numpy float32 arrays for WAV export
+    with torch.no_grad():
+        input_audio_np = input.squeeze().cpu().numpy().astype(np.float32)
+        desired_audio_np = desired_output.squeeze().cpu().numpy()[:T].astype(np.float32)
+        y_control_np = y_control.squeeze().cpu().numpy().astype(np.float32)
+        y_noEQ_np = y_noEQ.squeeze().cpu().numpy().astype(np.float32)
 
     result = {
         "loss_history": np.array(loss_history, dtype=float),
@@ -1561,6 +1577,11 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         "transition_times": transition_times_s if n_rirs > 1 else None,
         "optim_type": optim_type,
         "transition_time_s": sim_cfg["transition_time_s"],
+        "input_audio": input_audio_np,
+        "desired_audio": desired_audio_np,
+        "y_control": y_control_np,
+        "y_noEQ": y_noEQ_np,
+        "sr": int(sr),
     }
     if checkpoint_states:
         result["checkpoints"] = checkpoint_states
@@ -1675,6 +1696,8 @@ def process_buffers(EQG_params,
             LEM_out_buffer,
             est_mag_response_buffer,
             est_cpx_response_buffer,
+            noEQ_in_buffer,
+            noEQ_out_buffer,
             EQ,
             G,
             LEM,
@@ -1718,6 +1741,20 @@ def process_buffers(EQG_params,
     # Update LEM output buffer (shift left by hop_len)
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
+
+    # Non-EQ path: convolve raw input directly with LEM (no EQ or gain applied).
+    # This gives a reference output to compare against the adapted EQ output.
+    with torch.no_grad():
+        noEQ_in_pad = F.pad(in_buffer, (0, noEQ_in_buffer.shape[-1] - in_buffer.shape[-1]))
+        noEQ_in_buffer = F.pad(noEQ_in_buffer[..., hop_len:], (0, hop_len))
+        noEQ_in_buffer = noEQ_in_buffer + noEQ_in_pad
+        noEQ_out = LEMConv.apply(
+            noEQ_in_buffer[:, :, :frame_len],
+            LEM.view(1, 1, -1),
+            LEM_est
+        )
+        noEQ_out_buffer = F.pad(noEQ_out_buffer[..., hop_len:], (0, hop_len))
+        noEQ_out_buffer = noEQ_out_buffer + noEQ_out
 
     # Deconvolve actual response within ROI limits
     nfft = 2*frame_len-1
@@ -1881,6 +1918,6 @@ def process_buffers(EQG_params,
             debug_plot_state['fig'].canvas.draw()
             debug_plot_state['fig'].canvas.flush_events()
 
-    buffers = (EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error)
+    buffers = (EQ_out_buffer, LEM_out_buffer, est_mag_response_buffer, est_cpx_response_buffer, validation_error, noEQ_in_buffer, noEQ_out_buffer)
 
     return loss, buffers

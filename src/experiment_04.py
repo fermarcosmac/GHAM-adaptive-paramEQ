@@ -7,6 +7,7 @@ import random
 import numpy as np
 import matplotlib.pyplot as plt
 import torch
+import torchaudio
 
 from utils_ex04 import (
     load_config,
@@ -34,7 +35,7 @@ def main() -> None:
     cfg = load_config(config_path)
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
-    seed = int(cfg.get("seed", 123))
+    seed = int(cfg.get("seed", 124))
     set_seed(seed)
 
     experiment_name = cfg.get("experiment_name", "experiment_04")
@@ -76,6 +77,7 @@ def main() -> None:
     tt_transitions = {}         # key: tt -> transition_times list (seconds)
     input_ids_used = set()      # input identifiers (paths or labels) actually used
     checkpoint_examples = {}    # optim_type -> list of checkpoint states from a representative run
+    audio_examples = {}         # optim_type -> dict with input/desired/noEQ/y_control audio arrays
 
     # Pair optim_type and mu_opt
     optim_list = sim_param_grid.get("optim_type", [])
@@ -167,6 +169,16 @@ def main() -> None:
                 # Store one set of checkpoint examples per optimizer (first occurrence)
                 if "checkpoints" in result and optim_used not in checkpoint_examples:
                     checkpoint_examples[optim_used] = result["checkpoints"]
+
+                # Store one set of audio examples per optimizer (first occurrence)
+                if "input_audio" in result and optim_used not in audio_examples:
+                    audio_examples[optim_used] = {
+                        "input":   result["input_audio"],
+                        "desired": result["desired_audio"],
+                        "y_noEQ":  result["y_noEQ"],
+                        "y_control": result["y_control"],
+                        "sr":      result["sr"],
+                    }
             # end for input_spec
 
     # After all runs, serialize configuration and plotting data to results folder
@@ -192,5 +204,36 @@ def main() -> None:
 
     print(f"Saved config to: {config_out_path}")
     print(f"Saved plotting data to: {plot_out_path}")
+
+    # ---------------------------------------------------------------------------
+    # Save audio examples (input, desired, non-EQ output, per-optimizer EQ output)
+    # ---------------------------------------------------------------------------
+    if audio_examples:
+        audio_out_dir = root / "data" / "audio" / "output" / experiment_name
+        audio_out_dir.mkdir(parents=True, exist_ok=True)
+
+        def _save_wav(path: Path, arr: np.ndarray, sr: int) -> None:
+            """Save a float32 numpy array as a WAV file via torchaudio."""
+            # Peak-normalise to avoid clipping; skip if silent
+            peak = np.abs(arr).max()
+            if peak > 0:
+                arr = arr / peak
+            t = torch.from_numpy(arr).float().unsqueeze(0)  # (1, T)
+            torchaudio.save(str(path), t, sr)
+            print(f"  Saved: {path}")
+
+        # Common signals: identical for all optimizers, save once from any example
+        first_example = next(iter(audio_examples.values()))
+        sr_audio = first_example["sr"]
+        print(f"\nSaving audio examples to: {audio_out_dir}")
+        _save_wav(audio_out_dir / "input.wav",        first_example["input"],   sr_audio)
+        _save_wav(audio_out_dir / "desired.wav",      first_example["desired"], sr_audio)
+        _save_wav(audio_out_dir / "noEQ_output.wav",  first_example["y_noEQ"],  sr_audio)
+
+        # Per-optimizer EQ output
+        for optim_used, audio_data in audio_examples.items():
+            safe_name = optim_used.replace("-", "_").replace(" ", "_")
+            _save_wav(audio_out_dir / f"EQ_output_{safe_name}.wav",
+                      audio_data["y_control"], sr_audio)
 if __name__ == "__main__":
     main()
