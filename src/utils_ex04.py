@@ -1270,18 +1270,18 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         case "GHAM-1" | "GHAM-2":
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
-                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                    jac_fcn = jacrev(params_to_loss, argnums=(0,1), has_aux=False)
                 case "TD-SE" | "FD-SE":
-                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
+                    jac_fcn = jacfwd(params_to_loss, argnums=(0,1), has_aux=False)
         case "Newton" | "GHAM-3" | "GHAM-4":
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
-                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
+                    jac_fcn = jacrev(params_to_loss, argnums=(0,1), has_aux=False)
                 case "TD-SE" | "FD-SE":
-                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
-            hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
+                    jac_fcn = jacfwd(params_to_loss, argnums=(0,1), has_aux=False)
+            hess_fcn = jacfwd(jac_fcn, argnums=(0,1), has_aux=False)
             if optim_type == "GHAM-4":
-                jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
+                jac3_fcn = jacfwd(hess_fcn, argnums=(0,1), has_aux=False)
         case "LBFGS":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
 
@@ -1377,12 +1377,14 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         checkpoint_state = {} if do_checkpoint else None
 
         loss, buffers = process_buffers(EQ_params,
+            G_param,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
             est_mag_response_buffer,
             est_cpx_response_buffer,
             EQ,
+            G,
             LEM,
             frame_len,
             hop_len,
@@ -1469,7 +1471,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                         loss.backward()
                         jac = EQ_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                        jac = jac_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -1489,8 +1491,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                         EQ_params -= mu_opt*(mu_opt) * update.view_as(EQ_params)
                 EQ_params.grad = None
             case "Newton":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                jac = jac_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                hess = hess_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
                 # Regularize Hessian: H_reg = H + lambda_newton * I
                 dim = hess.shape[-1]
@@ -1506,8 +1508,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                     EQ_params -= mu_opt * update.view_as(EQ_params)
 
             case "GHAM-3" | "GHAM-4":
-                jac = jac_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
-                hess = hess_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                jac = jac_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
+                hess = hess_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -1525,7 +1527,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
-                        jac3 = jac3_fcn(EQ_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                        jac3 = jac3_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                         residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
                         theta_4 = theta_3 + lstsq(jac,residual_4).solution
                         correction = theta_1 + theta_2 + theta_3 + theta_4
@@ -1565,12 +1567,14 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
 
 def params_to_loss(EQ_params,
+            G_param,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
             est_mag_response_buffer,
             est_cpx_response_buffer,
             EQ,
+            G,
             LEM,
             frame_len,
             hop_len,
@@ -1582,8 +1586,9 @@ def params_to_loss(EQ_params,
             sr=None,
             ROI=None,
             use_true_LEM=False):
-    # Process through EQ
+    # Process through EQ + gain
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+    EQ_out = G.process(EQ_out, sr, G_param)
 
     # Update EQ output buffer (shift left by hop_len and add new samples)
     EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
@@ -1662,12 +1667,14 @@ def params_to_loss(EQ_params,
 
 
 def process_buffers(EQ_params,
+            G_param,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
             est_mag_response_buffer,
             est_cpx_response_buffer,
             EQ,
+            G,
             LEM,
             frame_len,
             hop_len,
@@ -1681,8 +1688,9 @@ def process_buffers(EQ_params,
             use_true_LEM=False,
             debug_plot_state=None,
             checkpoint_state=None):
-    # Process through EQ
+    # Process through EQ + gain
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
+    EQ_out = G.process(EQ_out, sr, G_param)
 
     # Update EQ output buffer (shift left by hop_len and add new samples)
     EQ_out_buffer = F.pad(EQ_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left

@@ -184,8 +184,8 @@ class ParametricEQ(Processor):
     def __init__(
         self,
         sample_rate: int,
-        min_gain_db: float = -20.0,
-        max_gain_db: float = 20.0,
+        min_gain_db: float = -20.0*0.01,
+        max_gain_db: float = 20.0*0.01,
         min_q_factor: float = 0.1,
         max_q_factor: float = 2.0,
     ):
