@@ -21,13 +21,21 @@
       0.05
     ],
     "optim_type": [
-      "GHAM-1"
+      "SGD",
+      "GHAM-1",
+      "Adam",
+      "Newton",
+      "GHAM-3"
     ],
     "mu_opt": [
+      0.001,
+      0.001,
+      1,
+      1,
       0.001
     ],
     "lambda_newton": [
-      10000.0
+      1000.0
     ],
     "loss_type": [
       "FD-MSE"

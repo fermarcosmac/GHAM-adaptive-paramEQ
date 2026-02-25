@@ -1215,12 +1215,15 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     #init_params_tensor = torch.ones(1,EQ.num_params)*0.5
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
-    EQ_params = torch.nn.Parameter(init_params_tensor.clone().to(device))
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
 
     # Initialize learnable gain
     G = Gain(sample_rate=sr)
-    G_param = torch.nn.Parameter(torch.tensor([[0.0]], device=device))  # start at unity gain (0 dB)
+    # Combine EQ params and gain into one parameter vector: EQG_params = [EQ_params | G_param]
+    # EQ_params occupies EQG_params[:, :-1], G_param (dB) occupies EQG_params[:, -1:]
+    EQG_params = torch.nn.Parameter(
+        torch.cat([init_params_tensor.clone(), torch.zeros(1, 1)], dim=-1).to(device)
+    )
 
     # Load/synthesise the input audio (as torch tensors)
     if input_type == "white_noise":
@@ -1261,27 +1264,27 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     # Set optimization (adaptive filtering)
     match optim_type:
         case "SGD":
-            optimizer = torch.optim.SGD([EQ_params,G_param], lr=mu_opt)
+            optimizer = torch.optim.SGD([EQG_params], lr=mu_opt)
         case "Adam":
-            optimizer = torch.optim.Adam([EQ_params,G_param], lr=mu_opt)
+            optimizer = torch.optim.Adam([EQG_params], lr=mu_opt)
         case "Muon":
             raise ValueError("Muon optimizer requires newer PyTorch version.")
-            optimizer = torch.optim.Muon([EQ_params,G_param], lr=mu_opt)
+            optimizer = torch.optim.Muon([EQG_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
-                    jac_fcn = jacrev(params_to_loss, argnums=(0,1), has_aux=False)
+                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
                 case "TD-SE" | "FD-SE":
-                    jac_fcn = jacfwd(params_to_loss, argnums=(0,1), has_aux=False)
+                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
         case "Newton" | "GHAM-3" | "GHAM-4":
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
-                    jac_fcn = jacrev(params_to_loss, argnums=(0,1), has_aux=False)
+                    jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
                 case "TD-SE" | "FD-SE":
-                    jac_fcn = jacfwd(params_to_loss, argnums=(0,1), has_aux=False)
-            hess_fcn = jacfwd(jac_fcn, argnums=(0,1), has_aux=False)
+                    jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
+            hess_fcn = jacfwd(jac_fcn, argnums=0, has_aux=False)
             if optim_type == "GHAM-4":
-                jac3_fcn = jacfwd(hess_fcn, argnums=(0,1), has_aux=False)
+                jac3_fcn = jacfwd(hess_fcn, argnums=0, has_aux=False)
         case "LBFGS":
             raise ValueError("LBFGS optimizer requires multiple function evaluations per optimization step. Not suitable for adaptive filtering scenario.")
 
@@ -1339,7 +1342,6 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     # buffer for estimated complex soundsystem response (store real/imag parts as real tensor)
     init_cpx = torch.fft.rfft(target_response, n=2*frame_len-1)
     est_cpx_response_buffer = torch.view_as_real(init_cpx).view(1, 1, -1, 2)
-    EQ_params_buffer = EQ_params.clone().detach()                       # buffer for EQ parameters
     rir_idx = 0                                                         # response index (adaptive scenarios)
     
 
@@ -1376,8 +1378,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         do_checkpoint = k in checkpoint_indices
         checkpoint_state = {} if do_checkpoint else None
 
-        loss, buffers = process_buffers(EQ_params,
-            G_param,
+        loss, buffers = process_buffers(EQG_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
@@ -1407,8 +1408,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         if checkpoint_state is not None:
             with torch.no_grad():
                 # Store flattened EQ parameters (normalized vector), time, frame index, and sample rate
-                checkpoint_state["EQ_params"] = EQ_params.detach().cpu().numpy().astype(np.float32)
-                checkpoint_state["G_param_db"] = float(G_param.detach().cpu().item())
+                checkpoint_state["EQ_params"] = EQG_params[:, :-1].detach().cpu().numpy().astype(np.float32)
+                checkpoint_state["G_param_db"] = float(EQG_params[:, -1:].detach().cpu().item())
                 checkpoint_state["time_s"] = float(current_time_s)
                 checkpoint_state["frame_idx"] = int(k)
                 checkpoint_state["sr"] = int(sr)
@@ -1419,7 +1420,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 # plotting script can operate on real-world units (gain/Q/Fc).
                 try:
                     # EQ_params is shape (num_params,) -> make it (1, num_params)
-                    eq_param_tensor = EQ_params.detach().view(1, -1)
+                    eq_param_tensor = EQG_params[:, :-1].detach().view(1, -1)
                     param_dict_norm = EQ.extract_param_dict(eq_param_tensor)
                     param_dict_denorm = EQ.denormalize_param_dict(param_dict_norm)
 
@@ -1470,9 +1471,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 match loss_type:
                     case "TD-MSE" | "FD-MSE":
                         loss.backward()
-                        jac = EQ_params.grad.clone().view(1,-1)
+                        jac = EQG_params.grad.clone().view(1,-1)
                     case "TD-SE" | "FD-SE":
-                        jac = jac_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                        jac = jac_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -1484,16 +1485,14 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 with torch.no_grad():
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
                     update = lstsq(jac, b).solution        # (num_params, 1)
-                    #ridge_regressor.fit(jac,b)
-                    #update_ridge = ridge_regressor.w      # (num_params, 1)
                     if optim_type == "GHAM-1":
-                        EQ_params -= mu_opt * update.view_as(EQ_params)
+                        EQG_params -= mu_opt * update.view_as(EQG_params)
                     elif optim_type == "GHAM-2":
-                        EQ_params -= mu_opt*(mu_opt) * update.view_as(EQ_params)
-                EQ_params.grad = None
+                        EQG_params -= mu_opt*(mu_opt) * update.view_as(EQG_params)
+                EQG_params.grad = None
             case "Newton":
-                jac = jac_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
-                hess = hess_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                jac = jac_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                hess = hess_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
                 # Regularize Hessian: H_reg = H + lambda_newton * I
                 dim = hess.shape[-1]
@@ -1506,11 +1505,11 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 with torch.no_grad():
                     jac = jac.view(-1,1)
                     update = lstsq(hess_reg, jac).solution        # (num_params, 1)
-                    EQ_params -= mu_opt * update.view_as(EQ_params)
+                    EQG_params -= mu_opt * update.view_as(EQG_params)
 
             case "GHAM-3" | "GHAM-4":
-                jac = jac_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
-                hess = hess_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                jac = jac_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
+                hess = hess_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                 
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
@@ -1528,20 +1527,20 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
-                        jac3 = jac3_fcn(EQ_params,G_param,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
+                        jac3 = jac3_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                         residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
                         theta_4 = theta_3 + lstsq(jac,residual_4).solution
                         correction = theta_1 + theta_2 + theta_3 + theta_4
-                    EQ_params += correction.view_as(EQ_params)
+                    EQG_params += correction.view_as(EQG_params)
             case _:
                 optimizer.zero_grad()
                 loss.backward()
-                G_param.grad = G_param.grad*1e2 # Scale gain gradient
+                EQG_params.grad[:, -1:] = EQG_params.grad[:, -1:] * 1e2  # Scale gain gradient
                 optimizer.step()
 
 
         with torch.no_grad():
-            EQ_params.clamp_(0.0, 1.0)
+            EQG_params.data[:, :-1].clamp_(0.0, 1.0)
             EQ_out_buffer = EQ_out_buffer.detach() # prevent graph accumulation across iterations
             LEM_out_buffer = LEM_out_buffer.detach()
             est_mag_response_buffer = est_mag_response_buffer.detach()
@@ -1568,8 +1567,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     return result
 
 
-def params_to_loss(EQ_params,
-            G_param,
+def params_to_loss(EQG_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
@@ -1588,6 +1586,9 @@ def params_to_loss(EQ_params,
             sr=None,
             ROI=None,
             use_true_LEM=False):
+    # Split combined parameter vector into EQ params and gain
+    EQ_params = EQG_params[:, :-1]
+    G_param = EQG_params[:, -1:]
     # Process through EQ + gain
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
     EQ_out = G.process(EQ_out, sr, G_param)
@@ -1668,8 +1669,7 @@ def params_to_loss(EQ_params,
     return loss
 
 
-def process_buffers(EQ_params,
-            G_param,
+def process_buffers(EQG_params,
             in_buffer,
             EQ_out_buffer,
             LEM_out_buffer,
@@ -1690,6 +1690,9 @@ def process_buffers(EQ_params,
             use_true_LEM=False,
             debug_plot_state=None,
             checkpoint_state=None):
+    # Split combined parameter vector into EQ params and gain
+    EQ_params = EQG_params[:, :-1]
+    G_param = EQG_params[:, -1:]
     # Process through EQ + gain
     EQ_out = EQ.process_normalized(in_buffer, EQ_params)
     EQ_out = G.process(EQ_out, sr, G_param)
