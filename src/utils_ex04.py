@@ -1408,6 +1408,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             with torch.no_grad():
                 # Store flattened EQ parameters (normalized vector), time, frame index, and sample rate
                 checkpoint_state["EQ_params"] = EQ_params.detach().cpu().numpy().astype(np.float32)
+                checkpoint_state["G_param_db"] = float(G_param.detach().cpu().item())
                 checkpoint_state["time_s"] = float(current_time_s)
                 checkpoint_state["frame_idx"] = int(k)
                 checkpoint_state["sr"] = int(sr)
@@ -1535,6 +1536,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             case _:
                 optimizer.zero_grad()
                 loss.backward()
+                G_param.grad = G_param.grad*1e2 # Scale gain gradient
                 optimizer.step()
 
 

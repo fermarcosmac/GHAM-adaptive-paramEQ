@@ -21,7 +21,7 @@
       0.05
     ],
     "optim_type": [
-      "SGD"
+      "GHAM-1"
     ],
     "mu_opt": [
       0.001

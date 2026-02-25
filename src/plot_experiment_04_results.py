@@ -302,8 +302,10 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                 # Overlay EQ-only frequency response if available
                 if eq_matrix is not None:
                     eq_matrix_np = np.asarray(eq_matrix, dtype=float)
+                    g_db = float(cp.get("G_param_db", 0.0))
                     try:
                         H_eq_db = compute_parametric_eq_response(eq_matrix_np, freqs_log, sr_cp)
+                        H_eq_db = H_eq_db + g_db  # apply learnable gain offset
                         ax.plot(freqs_log, H_eq_db, color=color_eq, linewidth=0.8, alpha=0.9, label="EQ")
                     except Exception:
                         pass

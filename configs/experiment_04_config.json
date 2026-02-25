@@ -7,7 +7,7 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["SGD"],
+    "optim_type": ["GHAM-1"],
     "mu_opt": [0.001],
     "lambda_newton": [10000.0],
     "loss_type": ["FD-MSE"],
