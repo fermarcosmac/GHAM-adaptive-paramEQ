@@ -6,7 +6,7 @@
     "frame_len": [8192],
     "hop_len": [8192],
     "window_type": [null],
-    "forget_factor": [0.05],
+    "forget_factor": [0.07],
     "optim_type": ["GHAM-1","SGD","Adam","GHAM-3"],
     "mu_opt": [0.0005,0.0005,0.01, 0.0005],
     "lambda_newton": [10000.0],
