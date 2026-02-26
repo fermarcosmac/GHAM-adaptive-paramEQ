@@ -18,7 +18,7 @@
       null
     ],
     "forget_factor": [
-      0.1
+      0.07
     ],
     "optim_type": [
       "GHAM-1",
