@@ -1147,6 +1147,12 @@ def discover_input_signals(input_cfg: Dict[str, Any]) -> List[Tuple[str, Dict[st
     return modes
 
 
+def build_step_sizes(mu_opt: float, EQG_params_shape: torch.Size, device: torch.device) -> torch.Tensor:
+    step_sizes = mu_opt * torch.ones(EQG_params_shape, device=device)
+    step_sizes[:,-1] = step_sizes[:,-1] * 1e2  # Scale step size for gain parameter
+    return step_sizes
+
+
 def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[str, Any]]) -> None:
     """ Code to run the ARE experiment given the configuration and inpput specifications
     """
@@ -1211,8 +1217,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
     # Initialize differentiable EQ
     EQ = ParametricEQ(sample_rate=sr)
-    init_params_tensor = torch.rand(1,EQ.num_params)
-    #init_params_tensor = torch.ones(1,EQ.num_params)*0.5
+    #init_params_tensor = torch.rand(1,EQ.num_params)
+    init_params_tensor = torch.ones(1,EQ.num_params)*0.5
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
@@ -1420,7 +1426,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 checkpoint_state["frame_idx"] = int(k)
                 checkpoint_state["sr"] = int(sr)
 
-                # Additionally store a denormalized (6, 3) EQ parameter matrix for
+                # Additionally store a denormalized (7, 3) EQ parameter matrix for
                 # direct use with compute_parametric_eq_response. This keeps the
                 # heavier denormalization work inside the experiment loop, so the
                 # plotting script can operate on real-world units (gain/Q/Fc).
@@ -1433,14 +1439,14 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                     def _scalar(name: str) -> float:
                         return float(param_dict_denorm[name].view(-1)[0].cpu().item())
 
-                    eq_matrix = np.zeros((6, 3), dtype=np.float32)
+                    eq_matrix = np.zeros((7, 3), dtype=np.float32)
 
                     # Low shelf
                     eq_matrix[0, 0] = _scalar("low_shelf_gain_db")
                     eq_matrix[0, 1] = _scalar("low_shelf_q_factor")
                     eq_matrix[0, 2] = _scalar("low_shelf_cutoff_freq")
 
-                    # Bands 0-3
+                    # Bands 0-4
                     eq_matrix[1, 0] = _scalar("band0_gain_db")
                     eq_matrix[1, 1] = _scalar("band0_q_factor")
                     eq_matrix[1, 2] = _scalar("band0_cutoff_freq")
@@ -1457,10 +1463,14 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                     eq_matrix[4, 1] = _scalar("band3_q_factor")
                     eq_matrix[4, 2] = _scalar("band3_cutoff_freq")
 
+                    eq_matrix[5, 0] = _scalar("band4_gain_db")
+                    eq_matrix[5, 1] = _scalar("band4_q_factor")
+                    eq_matrix[5, 2] = _scalar("band4_cutoff_freq")
+
                     # High shelf
-                    eq_matrix[5, 0] = _scalar("high_shelf_gain_db")
-                    eq_matrix[5, 1] = _scalar("high_shelf_q_factor")
-                    eq_matrix[5, 2] = _scalar("high_shelf_cutoff_freq")
+                    eq_matrix[6, 0] = _scalar("high_shelf_gain_db")
+                    eq_matrix[6, 1] = _scalar("high_shelf_q_factor")
+                    eq_matrix[6, 2] = _scalar("high_shelf_cutoff_freq")
 
                     checkpoint_state["EQ_matrix"] = eq_matrix
                 except Exception:
@@ -1492,9 +1502,11 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
                     update = lstsq(jac, b).solution        # (num_params, 1)
                     if optim_type == "GHAM-1":
-                        EQG_params -= mu_opt * update.view_as(EQG_params)
+                        step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device)
+                        EQG_params -= step_sizes * update.view_as(EQG_params)
                     elif optim_type == "GHAM-2":
-                        EQG_params -= mu_opt*(mu_opt) * update.view_as(EQG_params)
+                        step_sizes = build_step_sizes(mu_opt*(2-mu_opt), EQG_params.shape, device)
+                        EQG_params -= step_sizes * update.view_as(EQG_params)
                 EQG_params.grad = None
             case "Newton":
                 jac = jac_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
@@ -1511,7 +1523,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 with torch.no_grad():
                     jac = jac.view(-1,1)
                     update = lstsq(hess_reg, jac).solution        # (num_params, 1)
-                    EQG_params -= mu_opt * update.view_as(EQG_params)
+                    step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device)
+                    EQG_params -= step_sizes * update.view_as(EQG_params)
 
             case "GHAM-3" | "GHAM-4":
                 jac = jac_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
@@ -1526,15 +1539,16 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
 
                 with torch.no_grad():
-                    theta_1 = -mu_opt * lstsq(jac, loss_val).solution
-                    theta_2 = (1-mu_opt)*theta_1
-                    residual_3 = -mu_opt * theta_1.T@hess@theta_1 + jac@theta_2
-                    theta_3 = theta_2 + lstsq(jac,residual_3).solution
+                    step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device).T
+                    theta_1 = -step_sizes * lstsq(jac, loss_val).solution
+                    theta_2 = (1-step_sizes)*theta_1
+                    residual_3 = theta_1.T@hess@theta_1 + jac@theta_2
+                    theta_3 = theta_2 + -step_sizes * lstsq(jac,residual_3).solution
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
                         jac3 = jac3_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
-                        residual_4 = -mu_opt * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
+                        residual_4 = -step_sizes * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
                         theta_4 = theta_3 + lstsq(jac,residual_4).solution
                         correction = theta_1 + theta_2 + theta_3 + theta_4
                     EQG_params += correction.view_as(EQG_params)

@@ -133,6 +133,9 @@ def parametric_eq(
     band3_gain_db: torch.Tensor,
     band3_cutoff_freq: torch.Tensor,
     band3_q_factor: torch.Tensor,
+    band4_gain_db: torch.Tensor,
+    band4_cutoff_freq: torch.Tensor,
+    band4_q_factor: torch.Tensor,
     high_shelf_gain_db: torch.Tensor,
     high_shelf_cutoff_freq: torch.Tensor,
     high_shelf_q_factor: torch.Tensor,
@@ -205,10 +208,14 @@ def parametric_eq(
     high_shelf_cutoff_freq = high_shelf_cutoff_freq.view(-1, 1, 1)
     high_shelf_q_factor = high_shelf_q_factor.view(-1, 1, 1)
 
+    band4_gain_db = band4_gain_db.view(-1, 1, 1)
+    band4_cutoff_freq = band4_cutoff_freq.view(-1, 1, 1)
+    band4_q_factor = band4_q_factor.view(-1, 1, 1)
+
     eff_bs = x.size(0)
 
-    # six second order sections
-    sos = torch.zeros(eff_bs, 6, 6).type_as(low_shelf_gain_db)
+    # seven second order sections
+    sos = torch.zeros(eff_bs, 7, 6).type_as(low_shelf_gain_db)
     # ------------ low shelf ------------
     b, a = signal.biquad(
         low_shelf_gain_db,
@@ -254,6 +261,15 @@ def parametric_eq(
         "peaking",
     )
     sos[:, 4, :] = torch.cat((b, a), dim=-1)
+    # ------------ band4 (low-mid, 80-2000 Hz) ------------
+    b, a = signal.biquad(
+        band4_gain_db,
+        band4_cutoff_freq,
+        band4_q_factor,
+        sample_rate,
+        "peaking",
+    )
+    sos[:, 5, :] = torch.cat((b, a), dim=-1)
     # ------------ high shelf ------------
     b, a = signal.biquad(
         high_shelf_gain_db,
@@ -262,7 +278,7 @@ def parametric_eq(
         sample_rate,
         "high_shelf",
     )
-    sos[:, 5, :] = torch.cat((b, a), dim=-1)
+    sos[:, 6, :] = torch.cat((b, a), dim=-1)
 
     x_out = signal.sosfilt_via_fsm(sos, x)
 
