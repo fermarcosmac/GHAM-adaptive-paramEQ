@@ -36,10 +36,10 @@
       10000.0
     ],
     "loss_type": [
-      "FD-MSE"
+      "TD-MSE"
     ],
     "eps_0": [
-      2.0
+      0.0
     ],
     "target_response_type": [
       "delay_and_mag"
