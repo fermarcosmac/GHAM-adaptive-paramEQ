@@ -13,7 +13,7 @@ import soundfile as sf
 import torch.nn.functional as F
 from torch.func import jacrev, jacfwd
 from torch.linalg import lstsq
-from modules_ex04 import LEMConv
+from modules_ex04 import LEMConv, Ridge
 from lib.local_dasp_pytorch.modules import ParametricEQ, Gain
 from utils import (
     load_audio,
@@ -1277,6 +1277,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
             raise ValueError("Muon optimizer requires newer PyTorch version.")
             optimizer = torch.optim.Muon([EQG_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
+            alpha_ridge = 1e-3
+            ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
                     jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
@@ -1501,6 +1503,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 with torch.no_grad():
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
                     update = lstsq(jac, b).solution        # (num_params, 1)
+                    #ridge_regressor.fit(jac,b)
+                    #update = ridge_regressor.w
                     if optim_type == "GHAM-1":
                         step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device)
                         EQG_params -= step_sizes * update.view_as(EQG_params)

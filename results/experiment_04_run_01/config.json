@@ -24,22 +24,24 @@
       "GHAM-1",
       "SGD",
       "Adam",
-      "GHAM-3"
+      "GHAM-3",
+      "Newton"
     ],
     "mu_opt": [
       0.0005,
       0.0005,
       0.01,
-      0.0005
+      0.0005,
+      1
     ],
     "lambda_newton": [
-      10000.0
+      1000.0
     ],
     "loss_type": [
-      "TD-MSE"
+      "FD-MSE"
     ],
     "eps_0": [
-      0.0
+      1.0
     ],
     "target_response_type": [
       "delay_and_mag"
@@ -67,7 +69,7 @@
     "use_songs_folder": true,
     "max_num_songs": 1,
     "max_audio_len_s": [
-      180.0
+      120.0
     ]
   }
 }

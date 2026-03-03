@@ -7,11 +7,11 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.07],
-    "optim_type": ["GHAM-1","SGD","Adam","GHAM-3"],
-    "mu_opt": [0.0005,0.0005,0.01, 0.0005],
-    "lambda_newton": [10000.0],
-    "loss_type": ["TD-MSE"],
-    "eps_0": [0.0],
+    "optim_type": ["GHAM-1","SGD","Adam","GHAM-3","Newton"],
+    "mu_opt": [0.0005,0.0005,0.01, 0.0005, 1],
+    "lambda_newton": [1000.0],
+    "loss_type": ["FD-MSE"],
+    "eps_0": [1.0],
     "target_response_type": ["delay_and_mag"],
     "n_rirs": [3],
     "n_checkpoints": [4],
@@ -23,6 +23,6 @@
     "use_white_noise": false,
     "use_songs_folder": true,
     "max_num_songs": 1,
-    "max_audio_len_s": [180.0]
+    "max_audio_len_s": [120.0]
   }
 }
