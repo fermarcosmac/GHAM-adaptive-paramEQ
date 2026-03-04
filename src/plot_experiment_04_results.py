@@ -6,8 +6,6 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 
-from utils_ex04 import compute_parametric_eq_response
-
 # Use LaTeX-style mathtext for figure text and numbers
 mpl.rcParams.update(
     {
@@ -37,19 +35,24 @@ def load_results(experiment_name: str, root: Path) -> tuple[dict, dict]:
 
 
 def plot_results(cfg: dict, plot1_data: dict) -> None:
-    curves = plot1_data["curves"]              # validation error curves
-    loss_curves = plot1_data.get("loss_curves", {})  # training loss curves (optional)
+    curves = plot1_data["curves"]
+    loss_curves = plot1_data.get("loss_curves", {})
     tt_transitions = plot1_data.get("tt_transitions", {})
     input_signals = plot1_data.get("input_signals", None)
     checkpoint_examples = plot1_data.get("checkpoint_examples", {})
 
     # curves keys are (transition_time_s, optim_type)
-    unique_tt = sorted({tt for (tt, _) in curves.keys()})
-    if not unique_tt:
+    # Derive dimensions from 3-tuple keys: (transition_time_s, optim_type, loss_type)
+    all_curve_keys = list(curves.keys())
+    if not all_curve_keys:
         print("No curves found in plot data.")
         return
 
-    # Pretty-print configuration in a similar style to experiment_04 logs
+    unique_tt   = sorted({k[0] for k in all_curve_keys})
+    optim_types = sorted({k[1] for k in all_curve_keys})
+    unique_loss_types = sorted({k[2] for k in all_curve_keys})
+
+    # Pretty-print configuration
     print("Loaded configuration:\n")
     for top_key in sorted(cfg.keys()):
         section = cfg[top_key]
@@ -67,275 +70,204 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
             print(f"  {sig}")
         print()
 
-    fig, axes = plt.subplots(len(unique_tt), 1, figsize=(8, 3 * len(unique_tt)), sharex=False)
-    if len(unique_tt) == 1:
-        axes = [axes]
-
-    # Assign a color per optimizer
-    optim_types = sorted({opt for (_, opt) in curves.keys()})
+    # ------------------------------------------------------------------
+    # Combined figure: validation error + training loss for every
+    # (transition_time_s, loss_type) combination.
+    # Layout: rows = unique_tt
+    #         cols = 2 * len(unique_loss_types)
+    #               [val_LT0 | loss_LT0 | val_LT1 | loss_LT1 | ...]
+    # ------------------------------------------------------------------
     color_map = plt.get_cmap("tab10")
     optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
+    # Line style per loss_type (useful when overlaying)
+    lt_linestyle = {lt: ls for lt, ls in zip(unique_loss_types, ["-", "--", "-.", ":"])}
 
-    for idx, tt in enumerate(unique_tt):
-        ax = axes[idx]
-        ax.set_title(rf"$\mathrm{{Transition\ times:}}\ {tt}\ \mathrm{{s}}$")
-        ax.set_ylabel(r"$\mathrm{Validation\ error}$")
+    n_rows = len(unique_tt)
+    n_cols = 2 * len(unique_loss_types)
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(5 * n_cols, 2.8 * n_rows),
+        sharex=False, squeeze=False,
+    )
 
-        # Reference line at y=1
-        ax.axhline(y=1.0, color="dimgray", linestyle="--", linewidth=1.0, alpha=0.6)
+    def _plot_curve_series(ax, series, color, linestyle, label):
+        """Plot mean ± std of a list of (time_axis, values) pairs."""
+        min_len = min(len(v[1]) for v in series)
+        all_vals, common_time = [], None
+        for time_axis, vals in series:
+            all_vals.append(vals[:min_len])
+            if common_time is None:
+                common_time = time_axis[:min_len]
+        if not all_vals or common_time is None:
+            return
+        vals_stack = np.stack(all_vals, axis=0)
+        avg = np.mean(vals_stack, axis=0)
+        std = np.std(vals_stack, axis=0)
+        ax.plot(common_time, avg, color=color, linestyle=linestyle,
+                linewidth=1.0, alpha=0.95, label=label)
+        num_m = min(10, len(common_time))
+        idxs = np.linspace(0, len(common_time) - 1, num=num_m, dtype=int)
+        ax.errorbar(common_time[idxs], avg[idxs], yerr=std[idxs],
+                    fmt="none", ecolor=color, elinewidth=1.0, capsize=3, alpha=0.7)
 
-        # Plot vertical lines and shaded regions for transitions (if available)
-        transitions = tt_transitions.get(tt, None)
-        if transitions is not None:
-            for t_start, t_end in transitions:
-                if t_start == t_end:
-                    # Instantaneous transition: single dark gray dashed line
-                    ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
-                else:
-                    # Start/end of transition: two dark gray dashed lines
-                    ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
-                    ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
-                    # Dim shading over the transition zone
-                    ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
+    def _add_transitions(ax, tt):
+        trans = tt_transitions.get(tt, None)
+        if trans is None:
+            return
+        for t_start, t_end in trans:
+            ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+            if t_start != t_end:
+                ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
 
-        # For each optimizer, plot only the average curve with periodic std bars
-        for optim in optim_types:
-            key = (tt, optim)
-            if key not in curves:
-                continue
+    for row_i, tt in enumerate(unique_tt):
+        for lt_i, lt in enumerate(unique_loss_types):
+            # Column order: loss first, then validation error
+            ax_loss = axes[row_i, lt_i * 2]
+            ax_val  = axes[row_i, lt_i * 2 + 1]
 
-            series = curves[key]
-            color = optim_to_color[optim]
+            # Column header titles on top row only (no tt — shown via row annotation)
+            if row_i == 0:
+                ax_loss.set_title(f"{lt} — Training loss")
+                ax_val.set_title(f"{lt} — Validation error")
 
-            # Stack all probe curves to compute mean and std over probes
-            min_len = min(len(v[1]) for v in series)
-            all_vals = []
-            common_time = None
-            for time_axis, val_hist in series:
-                t = time_axis[:min_len]
-                v = val_hist[:min_len]
-                all_vals.append(v)
-                if common_time is None:
-                    common_time = t
+            ax_val.axhline(y=1.0, color="dimgray", linestyle="--", linewidth=1.0, alpha=0.6)
+            _add_transitions(ax_val, tt)
+            _add_transitions(ax_loss, tt)
 
-            if all_vals and common_time is not None:
-                vals_stack = np.stack(all_vals, axis=0)
-                avg_vals = np.mean(vals_stack, axis=0)
-                std_vals = np.std(vals_stack, axis=0)
+            for optim in optim_types:
+                color = optim_to_color[optim]
+                label = optim.replace("_", " ")
 
-                # Plot average curve (thinner line) with plain-text legend label
-                optim_label = optim.replace("_", " ")
-                ax.plot(
-                    common_time,
-                    avg_vals,
-                    color=color,
-                    alpha=0.95,
-                    linewidth=1.0,
-                    label=optim_label,
-                )
+                val_key  = (tt, optim, lt)
+                loss_key = (tt, optim, lt)
 
-                # Add std bars at a sp5arser subset of points along the time axis
-                num_markers = min(10, len(common_time))
-                idxs = np.linspace(0, len(common_time) - 1, num=num_markers, dtype=int)
-                ax.errorbar(
-                    common_time[idxs],
-                    avg_vals[idxs],
-                    yerr=std_vals[idxs],
-                    fmt="none",
-                    ecolor=color,
-                    elinewidth=1.0,
-                    capsize=3,
-                    alpha=0.7,
-                )
+                if val_key in curves and curves[val_key]:
+                    _plot_curve_series(ax_val, curves[val_key], color, "-", label)
 
-        if idx == len(unique_tt) - 1:
-            ax.set_xlabel(r"Time [s]")
+                if loss_key in loss_curves and loss_curves[loss_key]:
+                    series = loss_curves[loss_key]
+                    # clip for log scale
+                    clipped = [(ta, np.clip(v, 1e-8, None)) for ta, v in series]
+                    _plot_curve_series(ax_loss, clipped, color, "-", label)
 
-    # Add legend only once, in the top axis
-    if len(axes) > 0:
-        handles, labels = axes[0].get_legend_handles_labels()
-        if handles:
-            axes[0].legend(handles, labels, loc="upper right")
+            ax_loss.set_yscale("log")
+
+            if row_i == n_rows - 1:
+                ax_val.set_xlabel("Time [s]")
+                ax_loss.set_xlabel("Time [s]")
+
+
+        # Horizontal row label on the leftmost axis — separate from the y-axis label
+        axes[row_i, 0].annotate(
+            f"Transition time: {tt} s",
+            xy=(0, 0.5), xycoords="axes fraction",
+            xytext=(-70, 0), textcoords="offset points",
+            ha="right", va="center", rotation=0,
+            fontsize=9,
+            annotation_clip=False,
+        )
+
+        # Legend on the first (loss) subplot of the first loss type, first row only
+    handles, labels = axes[0, 0].get_legend_handles_labels()
+    if handles:
+        axes[0, 0].legend(handles, labels, loc="upper right", fontsize=7)
 
     plt.tight_layout()
+    plt.subplots_adjust(left=0.12)
 
     # ------------------------------------------------------------------
-    # Training loss vs. time (separate figure, same style as validation)
-    # ------------------------------------------------------------------
-    if loss_curves:
-        unique_tt_loss = sorted({tt for (tt, _) in loss_curves.keys()})
-        fig_loss, axes_loss = plt.subplots(len(unique_tt_loss), 1, figsize=(8, 3 * len(unique_tt_loss)), sharex=False)
-        if len(unique_tt_loss) == 1:
-            axes_loss = [axes_loss]
-
-        for idx, tt in enumerate(unique_tt_loss):
-            ax = axes_loss[idx]
-            # Match LaTeX-style formatting used in validation-error plots
-            ax.set_title(rf"$\mathrm{{Transition\ times:}}\ {tt}\ \mathrm{{s}}$ (Loss)")
-            ax.set_ylabel(r"$\mathrm{Loss}$")
-
-            # Plot vertical lines and shaded regions for transitions (if available)
-            transitions = tt_transitions.get(tt, None)
-            if transitions is not None:
-                for t_start, t_end in transitions:
-                    if t_start == t_end:
-                        ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
-                    else:
-                        ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
-                        ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
-                        ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
-
-            # For each optimizer, plot only the average curve with periodic std bars
-            for optim in optim_types:
-                key = (tt, optim)
-                if key not in loss_curves:
-                    continue
-
-                series = loss_curves[key]
-                color = optim_to_color[optim]
-
-                min_len = min(len(v[1]) for v in series)
-                all_vals = []
-                common_time = None
-                for time_axis, loss_hist in series:
-                    t = time_axis[:min_len]
-                    v = loss_hist[:min_len]
-                    all_vals.append(v)
-                    if common_time is None:
-                        common_time = t
-
-                if all_vals and common_time is not None:
-                    vals_stack = np.stack(all_vals, axis=0)
-                    avg_vals = np.mean(vals_stack, axis=0)
-                    std_vals = np.std(vals_stack, axis=0)
-
-                    # For log-scale plotting, avoid zeros/negatives
-                    avg_plot = np.clip(avg_vals, 1e-8, None)
-
-                    optim_label = optim.replace("_", " ")
-                    ax.plot(
-                        common_time,
-                        avg_plot,
-                        color=color,
-                        alpha=0.95,
-                        linewidth=1.0,
-                        label=optim_label,
-                    )
-
-                    num_markers = min(10, len(common_time))
-                    idxs = np.linspace(0, len(common_time) - 1, num=num_markers, dtype=int)
-                    ax.errorbar(
-                        common_time[idxs],
-                        avg_plot[idxs],
-                        yerr=std_vals[idxs],
-                        fmt="none",
-                        ecolor=color,
-                        elinewidth=1.0,
-                        capsize=3,
-                        alpha=0.7,
-                    )
-
-            # Use logarithmic y-axis for loss curves
-            ax.set_yscale("log")
-
-            if idx == len(unique_tt_loss) - 1:
-                ax.set_xlabel(r"Time [s]")
-
-        # Legend on top axis only
-        if len(axes_loss) > 0:
-            handles_l, labels_l = axes_loss[0].get_legend_handles_labels()
-            if handles_l:
-                axes_loss[0].legend(handles_l, labels_l, loc="upper right")
-
-        plt.tight_layout()
-
-    # ------------------------------------------------------------------
-    # Checkpoint-based response tiles: one example run per optimizer
+    # Condensed checkpoint figure
+    # Layout: rows = unique_loss_types
+    #         cols = n_checkpoints  (taken from representative optimizer)
+    # All optimizers' EQ responses are overlaid per cell.
+    # Shared responses (desired, LEM, total) from the first available optimizer.
     # ------------------------------------------------------------------
     if checkpoint_examples:
-        optim_keys = sorted(checkpoint_examples.keys())
-        # Number of checkpoints per optimizer (assume consistent within each list)
-        n_rows = len(optim_keys)
-        n_cols = max(len(checkpoint_examples[opt]) for opt in optim_keys)
+        # checkpoint_examples: {loss_type: {optim_type: [cp, ...]}}
+        # Normalize: handle old format ({optim_type: [cp]}) transparently
+        if not isinstance(next(iter(checkpoint_examples.values())), dict):
+            # Old single-level format — wrap it in a dict keyed by a placeholder loss_type
+            checkpoint_examples = {"(default)": checkpoint_examples}
 
-        fig2, axes2 = plt.subplots(n_rows, n_cols, figsize=(3 * n_cols, 3 * n_rows), sharex=True, sharey=True)
-        if n_rows == 1:
-            axes2 = np.array([axes2])
-        if n_cols == 1:
-            axes2 = axes2[:, np.newaxis]
+        cp_loss_types = sorted(checkpoint_examples.keys())
+        # Find max number of checkpoints across all (lt, optim) combos
+        n_cp_cols = max(
+            len(cps)
+            for lt_cps in checkpoint_examples.values()
+            for cps in lt_cps.values()
+        )
+        n_cp_rows = len(cp_loss_types)
 
-        for row, opt in enumerate(optim_keys):
-            checkpoints = checkpoint_examples[opt]
-            color_total = "tab:blue"
-            color_lem = "tab:green"
-            color_desired = "tab:orange"
-            color_eq = "tab:red"
+        fig2, axes2 = plt.subplots(
+            n_cp_rows, n_cp_cols,
+            figsize=(3.5 * n_cp_cols, 3.5 * n_cp_rows),
+            sharex=True, sharey=True, squeeze=False,
+        )
 
-            for col, cp in enumerate(checkpoints):
-                if col >= n_cols:
-                    break
-                ax = axes2[row, col]
+        eq_colors = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
 
-                freqs_log = np.asarray(cp["freqs_log"], dtype=float)
-                H_total = np.asarray(cp["H_total_db"], dtype=float)
-                H_desired = np.asarray(cp["H_desired_db"], dtype=float)
-                H_lem = np.asarray(cp["H_lem_db"], dtype=float)
+        color_desired = "black"
+        color_lem     = "black"
 
-                # Prefer denormalized EQ_matrix stored by the experiment. If not
-                # available (e.g., older results), fall back to reshaping the
-                # flattened normalized EQ_params.
-                eq_matrix = cp.get("EQ_matrix", None)
-                if eq_matrix is None:
-                    eq_params_flat = cp.get("EQ_params", None)
-                    if eq_params_flat is not None:
-                        eq_params_flat = np.asarray(eq_params_flat, dtype=float).ravel()
-                        if eq_params_flat.size % 3 == 0:
-                            n_filters = eq_params_flat.size // 3
-                            eq_matrix = eq_params_flat.reshape(n_filters, 3)
-                sr_cp = float(cp.get("sr", cfg.get("sample_rate", 48000)))
-                t_s = float(cp.get("time_s", 0.0))
+        for row_i, lt in enumerate(cp_loss_types):
+            by_optim = checkpoint_examples[lt]
+            all_optims_sorted = sorted(by_optim.keys())
 
-                ax.plot(freqs_log, H_desired, color=color_desired, linewidth=1.0, alpha=0.9, label="Desired")
-                ax.plot(freqs_log, H_lem, color=color_lem, linewidth=0.8, alpha=0.9, label="LEM")
-                ax.plot(freqs_log, H_total, color=color_total, linewidth=1.0, alpha=0.9, label="EQ+LEM")
+            # reference (shared background responses) from the first optimizer
+            ref_optim = all_optims_sorted[0]
+            ref_cps   = by_optim[ref_optim]
 
-                # Overlay EQ-only frequency response if available
-                if eq_matrix is not None:
-                    eq_matrix_np = np.asarray(eq_matrix, dtype=float)
-                    g_db = float(cp.get("G_param_db", 0.0))
-                    try:
-                        H_eq_db = compute_parametric_eq_response(eq_matrix_np, freqs_log, sr_cp)
-                        H_eq_db = H_eq_db + g_db  # apply learnable gain offset
-                        ax.plot(freqs_log, H_eq_db, color=color_eq, linewidth=0.8, alpha=0.9, label="EQ")
-                    except Exception:
-                        pass
+            for col_i in range(n_cp_cols):
+                ax = axes2[row_i, col_i]
+
+                # Shared reference from first optimizer
+                if col_i < len(ref_cps):
+                    ref_cp = ref_cps[col_i]
+                    freqs_log  = np.asarray(ref_cp["freqs_log"],    dtype=float)
+                    H_desired  = np.asarray(ref_cp["H_desired_db"], dtype=float)
+                    H_lem      = np.asarray(ref_cp["H_lem_db"],     dtype=float)
+                    H_total_ref = np.asarray(ref_cp["H_total_db"],  dtype=float)
+                    sr_cp = float(ref_cp.get("sr", cfg.get("sample_rate", 48000)))
+                    t_s   = float(ref_cp.get("time_s", 0.0))
+
+                    ax.plot(freqs_log, H_desired, color=color_desired,
+                            linewidth=1.4, linestyle="-", alpha=1.0, label="Desired", zorder=5)
+                    ax.plot(freqs_log, H_lem, color=color_lem,
+                            linewidth=1.0, linestyle="--", alpha=0.8, label="LEM (no EQ)", zorder=4)
+
+                    if row_i == 0:
+                        ax.set_title(f"t = {t_s:.1f} s")
+
+                # Per-optimizer compensated response (EQ + LEM) overlays
+                for opt in all_optims_sorted:
+                    opt_cps = by_optim[opt]
+                    if col_i >= len(opt_cps):
+                        continue
+                    cp = opt_cps[col_i]
+                    freqs_log_o = np.asarray(cp["freqs_log"], dtype=float)
+                    H_total_opt = cp.get("H_total_db", None)
+                    if H_total_opt is not None:
+                        ax.plot(freqs_log_o, np.asarray(H_total_opt, dtype=float),
+                                color=eq_colors.get(opt, "gray"),
+                                linewidth=1.0, alpha=0.55,
+                                label=opt.replace("_", " "), zorder=3)
 
                 ax.set_xscale("log")
-                if row == 0:
-                    ax.set_title(f"t = {t_s:.1f} s")
-                if row == n_rows - 1:
+                ax.set_ylim(-20, 20)
+                ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.6)
+                if row_i == n_cp_rows - 1:
                     ax.set_xlabel("Frequency [Hz]")
-                if col == 0:
-                    ax.set_ylabel("Magnitude [dB]")
+                if col_i == 0:
+                    ax.set_ylabel(f"{lt}\nMagnitude [dB]")
 
-                if row == 0 and col == 0:
-                    ax.legend(loc="best")
-
-        # Add optimizer names as text on the left of each row
-        for row, opt in enumerate(optim_keys):
-            label = opt.replace("_", " ")
-            axes2[row, 0].text(
-                0.02,
-                0.95,
-                label,
-                transform=axes2[row, 0].transAxes,
-                ha="left",
-                va="top",
-                fontsize=9,
-                bbox=dict(boxstyle="round,pad=0.2", facecolor="white", alpha=0.7),
-            )
+        # Single legend in top-left cell
+        handles2, labels2 = axes2[0, 0].get_legend_handles_labels()
+        if handles2:
+            axes2[0, 0].legend(handles2, labels2, loc="best", fontsize=7)
 
         plt.tight_layout()
+
     plt.show()
 
 
