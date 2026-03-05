@@ -1655,7 +1655,7 @@ def params_to_loss(EQG_params,
     LEM_out_buffer = F.pad(LEM_out_buffer[..., hop_len:], (0, hop_len))  # Shift buffer left
     LEM_out_buffer += LEM_out
 
-    # # Deconvolve actual response within ROI limits
+    # Deconvolve actual response within ROI limits
     nfft = 2*frame_len-1
     freqs = torch.fft.rfftfreq(nfft, d=1.0/sr, device=LEM_out_buffer.device)
     eps = 1e-8

@@ -61,13 +61,13 @@ if __name__ == "__main__":
     
     # Set paths (same as experiment_01)
     base = Path(".")
-    rir_dir = base / "data" / "rir"
-    audio_input_dir = base / "data" / "audio" / "input"
+    rir_dir = base / "data" / "rir" / "moving_position"
+    audio_input_dir = base / "data" / "audio" / "input" / "songs"
     
     # === INPUT SIGNAL CONFIGURATION ===
     # Choose input signal type: "white_noise" or audio filename from data/audio/input/
     # Available audio files: guitar-riff.wav, guitar-riff_short.wav, onde_day_funk.wav
-    input_type = "onde_day_funk.wav"  # Options: "white_noise", or filename like "guitar-riff.wav"
+    input_type = "white_noise"  # Options: "white_noise", or filename like "guitar-riff.wav"
     # input_type = "guitar-riff_short.wav"  # Uncomment to use guitar audio
     
     # Maximum duration for audio files (None = use full audio)
@@ -75,7 +75,7 @@ if __name__ == "__main__":
     
     # Set simulation parameters
     sr = 48000  # Sample rate (will be updated if RIR has different rate)
-    T_seconds = 10.0  # Simulation duration in seconds (used for white noise and identification)
+    T_seconds = 20.0  # Simulation duration in seconds (used for white noise and identification)
     
     # Load RIR for secondary path S(z)
     # The RIR represents the acoustic path from actuator (speaker) to sensor (microphone)
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     
     # S(z): Secondary path coefficients from loaded RIR
     # Truncate or use full RIR based on desired filter length
-    Sw_max_len = min(len(rir), 8192//2)  # Limit secondary path length for computational efficiency
+    Sw_max_len = min(len(rir), 8192*2)  # Limit secondary path length for computational efficiency
     Sw = rir[:Sw_max_len].astype(np.float64)  # Secondary path coefficients
     Sw = Sw / np.max(np.abs(Sw))  # Normalize to prevent numerical issues
     
@@ -152,7 +152,7 @@ if __name__ == "__main__":
     
     # Initialize the secondary path estimate Sh(z)
     # Use a filter length that can capture the main features of the RIR
-    Sh_len = min(1024, len(Sw))  # Filter length for Sh(z) - balance between accuracy and computation
+    Sh_len = min(1024*4, len(Sw))  # Filter length for Sh(z) - balance between accuracy and computation
     Shx = np.zeros(Sh_len)  # State buffer (input samples)
     Shw = np.zeros(Sh_len)  # Filter weights/coefficients
     e_iden = np.zeros(T_iden)    # Identification error buffer

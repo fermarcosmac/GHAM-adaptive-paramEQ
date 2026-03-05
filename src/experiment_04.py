@@ -43,7 +43,7 @@ def _song_stem(input_spec) -> str:
 def main() -> None:
 
     # Load configuration
-    config_path = root / "configs" / "experiment_04_config_debug.json"
+    config_path = root / "configs" / "experiment_04_config.json"
     cfg = load_config(config_path)
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
@@ -103,8 +103,24 @@ def main() -> None:
             )
 
     # All other parameters form a full grid (includes loss_type, transition_time_s, ...)
+    # lambda_newton and eps_0 are excluded from the grid if they are dicts (per-loss-type)
+    _per_loss_scalar_keys = ("lambda_newton", "eps_0")
+
+    lambda_newton_raw = sim_param_grid.get("lambda_newton", None)
+    eps_0_raw         = sim_param_grid.get("eps_0", None)
+
+    # Per-loss-type scalars: dict {loss_type: [val]} or flat list [val]
+    lambda_newton_per_loss: dict = {}
+    eps_0_per_loss: dict = {}
+    if isinstance(lambda_newton_raw, dict):
+        lambda_newton_per_loss = lambda_newton_raw
+    if isinstance(eps_0_raw, dict):
+        eps_0_per_loss = eps_0_raw
+
     base_param_grid = {
-        k: v for k, v in sim_param_grid.items() if k not in ("optim_type", "mu_opt")
+        k: v for k, v in sim_param_grid.items()
+        if k not in ("optim_type", "mu_opt")
+        and not (k in _per_loss_scalar_keys and isinstance(v, dict))
     }
 
     # Pre-compute total number of parameter combinations for logging
@@ -136,6 +152,10 @@ def main() -> None:
         torchaudio.save(str(path), t, sr)
         print(f"  Saved: {path}")
 
+    def _unwrap(v):
+        """Unwrap a single-element list to a scalar; pass scalars through unchanged."""
+        return v[0] if isinstance(v, list) and len(v) == 1 else v
+
     combo_idx = 0
     for base_cfg in base_cfgs:
 
@@ -145,6 +165,16 @@ def main() -> None:
             resolved_mu_list = mu_per_loss.get(current_lt, list(mu_per_loss.values())[0])
         else:
             resolved_mu_list = mu_list
+
+        # Resolve per-loss-type scalars (unwrap single-element lists if present)
+        resolved_lambda_newton = (
+            _unwrap(lambda_newton_per_loss.get(current_lt, list(lambda_newton_per_loss.values())[0]))
+            if lambda_newton_per_loss else None
+        )
+        resolved_eps_0 = (
+            _unwrap(eps_0_per_loss.get(current_lt, list(eps_0_per_loss.values())[0]))
+            if eps_0_per_loss else None
+        )
 
         if optim_list and resolved_mu_list:
             opt_mu_pairs = list(zip(optim_list, resolved_mu_list))
@@ -157,6 +187,10 @@ def main() -> None:
                 sim_cfg["optim_type"] = optim
             if mu is not None:
                 sim_cfg["mu_opt"] = mu
+            if resolved_lambda_newton is not None:
+                sim_cfg["lambda_newton"] = resolved_lambda_newton
+            if resolved_eps_0 is not None:
+                sim_cfg["eps_0"] = resolved_eps_0
 
             sim_cfg["rir_dir"] = str(rir_dir)
             if scenario == "static":
