@@ -1497,6 +1497,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 # TODO: check if this nonnegativity really prevents oscilatory behaviour
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 
+                # TODO: handle possible ill_conditioning of Jacobian/Hessian
+                
                 # Log irreducible loss and jacobian condition number
                 irreducible_loss_history.append(loss_val.mean().item())
                 #jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
@@ -1539,9 +1541,11 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 loss_val = loss_val.view(-1,1)
 
+                # TODO: handle possible ill_conditioning of Jacobian/Hessian
+
                 # Log irreducible loss and jacobian condition number
                 irreducible_loss_history.append(loss_val.mean().item())
-                jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
+                #jac_cond_history.append(torch.linalg.cond(jac.detach().cpu().float()).item())
 
                 with torch.no_grad():
                     step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device).T

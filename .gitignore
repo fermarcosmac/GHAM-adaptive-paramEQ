@@ -1,13 +1,9 @@
 # Ignore everything inside data/SoundCam
 data/SoundCam/*
 data/MedleyDB/*
-data/rir/*
-data/audio/input/songs/*
 data/audio/output/*
 
 # Except this file
 !data/SoundCam/.gitkeep
 !data/MedleyDB/.gitkeep
-!data/rir/.gitkeep
-!data/audio/input/songs/.gitkeep
 !data/audio/output/.gitkeep
