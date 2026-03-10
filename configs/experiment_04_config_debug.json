@@ -1,5 +1,5 @@
 {
-  "experiment_name": "experiment_04_run_01",
+  "experiment_name": "experiment_04_run_03",
   "scenario": "moving_position",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
@@ -7,31 +7,31 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["GHAM-3"],
+    "optim_type": ["Newton"],
     "mu_opt": {
-      "FD-MSE": [0.005],
-      "TD-MSE": [0.001]
+      "FD-MSE": [1.0],
+      "TD-MSE": [1.0]
     },
     "lambda_newton": {
-      "FD-MSE": 1000.0,
-      "TD-MSE": 1.0
+      "FD-MSE": 10000.0,
+      "TD-MSE": 0.1
     },
-    "loss_type": ["TD-MSE"],
+    "loss_type": ["FD-MSE","TD-MSE"],
     "eps_0": {
-      "FD-MSE": 10.0,
+      "FD-MSE": 1.0,
       "TD-MSE": 0.0
     },
     "target_response_type": ["delay_and_mag"],
     "n_rirs": [1],
     "n_checkpoints": [4],
-    "transition_time_s": [1.0, 15.0, 30.0],
+    "transition_time_s": [15.0],
     "use_true_LEM": [true],
     "debug_plot": [false]
   },
   "input": {
-    "use_white_noise": true,
-    "use_songs_folder": false,
-    "max_num_songs": 1,
-    "max_audio_len_s": [120.0]
+    "use_white_noise": false,
+    "use_songs_folder": true,
+    "max_num_songs": 12,
+    "max_audio_len_s": [180.0]
   }
 }

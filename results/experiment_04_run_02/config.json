@@ -79,7 +79,7 @@
   "input": {
     "use_white_noise": false,
     "use_songs_folder": true,
-    "max_num_songs": 1,
+    "max_num_songs": 12,
     "max_audio_len_s": [
       180.0
     ]

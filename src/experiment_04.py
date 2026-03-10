@@ -290,5 +290,6 @@ def main() -> None:
     print(f"Saved config to: {config_out_path}")
     print(f"Saved plotting data to: {plot_out_path}")
     print(f"Saved audio to: {audio_out_dir}")
+
 if __name__ == "__main__":
     main()
