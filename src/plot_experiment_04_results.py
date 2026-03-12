@@ -84,18 +84,27 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
     n_rows = len(unique_tt)
     n_cols = 2 * len(unique_loss_types)
-    fig, axes = plt.subplots(
-        n_rows, n_cols,
-        figsize=(5 * n_cols, 2.8 * n_rows),
-        sharex=False, squeeze=False,
+    # Extra label column (index 0) with half the width of a data column
+    fig = plt.figure(figsize=(2.5 * n_cols + 1.2, 2 * n_rows))
+    gs = fig.add_gridspec(
+        n_rows, n_cols + 1,
+        width_ratios=[0.5] + [1.0] * n_cols,
     )
+    # Hidden axes in column 0 — used only for row labels
+    label_axes = [fig.add_subplot(gs[r, 0]) for r in range(n_rows)]
+    for _ax in label_axes:
+        _ax.set_axis_off()
+    # Data axes occupy columns 1..n_cols
+    axes = np.array([[fig.add_subplot(gs[r, c + 1]) for c in range(n_cols)]
+                     for r in range(n_rows)])
 
     def _plot_curve_series(ax, series, color, linestyle, label):
         """Plot mean ± std of a list of (time_axis, values) pairs."""
         min_len = min(len(v[1]) for v in series)
         all_vals, common_time = [], None
         for time_axis, vals in series:
-            all_vals.append(vals[:min_len])
+            if not np.isnan(vals).any(): # Only append if no NaNs appear
+                all_vals.append(vals[:min_len])
             if common_time is None:
                 common_time = time_axis[:min_len]
         if not all_vals or common_time is None:
@@ -151,6 +160,12 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                     clipped = [(ta, np.clip(v, 1e-8, None)) for ta, v in series]
                     _plot_curve_series(ax_loss, clipped, color, "-", label)
 
+                # Set y-limits based on loss type
+                if lt == 'FD-MSE':
+                    ax_val.set_ylim(-0.1, 1.5)
+                    ax_loss.set_ylim(1, 1e4)
+                elif lt == 'TD-MSE':
+                    ax_val.set_ylim(-0.1, 3.5)
             ax_loss.set_yscale("log")
 
             if row_i == n_rows - 1:
@@ -158,23 +173,22 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                 ax_loss.set_xlabel("Time [s]")
 
 
-        # Horizontal row label on the leftmost axis — separate from the y-axis label
-        axes[row_i, 0].annotate(
-            f"Transition time: {tt} s",
-            xy=(0, 0.5), xycoords="axes fraction",
-            xytext=(-70, 0), textcoords="offset points",
-            ha="right", va="center", rotation=0,
+        # Row label in its own dedicated column — always inside the figure
+        label_axes[row_i].text(
+            0.5, 0.5,
+            f"Transition\ntime: {tt} s",
+            transform=label_axes[row_i].transAxes,
+            ha="center",
+            va="center",
             fontsize=9,
-            annotation_clip=False,
         )
 
-        # Legend on the first (loss) subplot of the first loss type, first row only
+    # Legend on the first (loss) subplot of the first loss type, first row only
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
         axes[0, 0].legend(handles, labels, loc="upper right", fontsize=7)
 
     plt.tight_layout()
-    plt.subplots_adjust(left=0.12)
 
     # ------------------------------------------------------------------
     # Condensed checkpoint figure
@@ -201,7 +215,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
         fig2, axes2 = plt.subplots(
             n_cp_rows, n_cp_cols,
-            figsize=(3.5 * n_cp_cols, 3.5 * n_cp_rows),
+            figsize=(2 * n_cp_cols, 2.5 * n_cp_rows), # adjust checkpoint figure size
             sharex=True, sharey=True, squeeze=False,
         )
 
