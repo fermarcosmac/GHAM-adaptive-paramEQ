@@ -1498,6 +1498,10 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 
                 # TODO: handle possible ill_conditioning of Jacobian/Hessian
+                try:
+                    ill = torch.linalg.cond(jac.detach().cpu().float()).item() > 1e6
+                except:
+                    pass
 
                 # Log irreducible loss and jacobian condition number
                 irreducible_loss_history.append(loss_val.mean().item())
@@ -1506,6 +1510,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 with torch.no_grad():
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
                     update = lstsq(jac, b).solution        # (num_params, 1)
+                    if torch.isnan(update).any() or torch.isinf(update).any():
+                        pass
+                    update = torch.zeros_like(update) if ill else update  # if ill-conditioned, skip update (equivalent to very small step size)
                     #ridge_regressor.fit(jac,b)
                     #update = ridge_regressor.w
                     if optim_type == "GHAM-1":

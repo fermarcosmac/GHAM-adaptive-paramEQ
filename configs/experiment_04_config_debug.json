@@ -7,10 +7,10 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["GHAM-1","SGD","Adam","GHAM-3","Newton"],
+    "optim_type": ["GHAM-1"],
     "mu_opt": {
-      "FD-MSE": [0.0005, 0.0005, 0.01, 0.0005, 1],
-      "TD-MSE": [0.001, 0.1, 0.001, 0.001, 1]
+      "FD-MSE": [0.0005],
+      "TD-MSE": [0.001]
     },
     "lambda_newton": {
       "FD-MSE": 10000.0,
@@ -29,8 +29,8 @@
     "debug_plot": [false]
   },
   "input": {
-    "use_white_noise": true,
-    "use_songs_folder": false,
+    "use_white_noise": false,
+    "use_songs_folder": true,
     "max_num_songs": 12,
     "max_audio_len_s": [180.0]
   }
