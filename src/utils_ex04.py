@@ -1501,7 +1501,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 try:
                     ill = torch.linalg.cond(jac.detach().cpu().float()).item() > 1e6
                 except:
-                    pass
+                    ill = True
 
                 # Log irreducible loss and jacobian condition number
                 irreducible_loss_history.append(loss_val.mean().item())
@@ -1510,8 +1510,6 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 with torch.no_grad():
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
                     update = lstsq(jac, b).solution        # (num_params, 1)
-                    if torch.isnan(update).any() or torch.isinf(update).any():
-                        pass
                     update = torch.zeros_like(update) if ill else update  # if ill-conditioned, skip update (equivalent to very small step size)
                     #ridge_regressor.fit(jac,b)
                     #update = ridge_regressor.w
