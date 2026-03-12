@@ -105,7 +105,6 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
         for time_axis, vals in series:
             if not np.isnan(vals).any(): # Only append if no NaNs appear
                 all_vals.append(vals[:min_len])
-            assert not np.isnan(vals).any() # DEBUG
             if common_time is None:
                 common_time = time_axis[:min_len]
         if not all_vals or common_time is None:
@@ -288,7 +287,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_run_03"
+    experiment_name = "experiment_04_WHITE_NOISE_MOVING_POSITION"
 
     # Project root (same convention as experiment_04.py)
     root = Path(__file__).resolve().parents[1]
