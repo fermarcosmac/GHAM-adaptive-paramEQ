@@ -49,14 +49,14 @@ def get_delay_from_ir(rir: np.ndarray, sr: int) -> int:
     return delay_samples
 
 
-def _six_biquad_eq_params_to_dict(EQ_params: np.ndarray) -> dict:
+def _seven_biquad_eq_params_to_dict(EQ_params: np.ndarray) -> dict:
     """
-    Convert (6, 3) EQ parameter matrix into a named parameter dictionary.
+    Convert (7, 3) EQ parameter matrix into a named parameter dictionary.
 
-    EQ_params: np.ndarray with shape (6, 3)
+    EQ_params: np.ndarray with shape (7, 3)
                columns: [gain_dB, Q_or_slope, Fc]
     """
-    assert EQ_params.shape == (6, 3), "Expected EQ_params shape (6, 3)"
+    assert EQ_params.shape == (7, 3), "Expected EQ_params shape (7, 3)"
 
     return {
         # ---- Low shelf ----
@@ -84,10 +84,15 @@ def _six_biquad_eq_params_to_dict(EQ_params: np.ndarray) -> dict:
         "band3_q_factor": float(EQ_params[4, 1]),
         "band3_cutoff_freq": float(EQ_params[4, 2]),
 
+        # ---- Band 4 ----
+        "band4_gain_db": float(EQ_params[5, 0]),
+        "band4_q_factor": float(EQ_params[5, 1]),
+        "band4_cutoff_freq": float(EQ_params[5, 2]),
+
         # ---- High shelf ----
-        "high_shelf_gain_db": float(EQ_params[5, 0]),
-        "high_shelf_q_factor": float(EQ_params[5, 1]),
-        "high_shelf_cutoff_freq": float(EQ_params[5, 2]),
+        "high_shelf_gain_db": float(EQ_params[6, 0]),
+        "high_shelf_q_factor": float(EQ_params[6, 1]),
+        "high_shelf_cutoff_freq": float(EQ_params[6, 2]),
     }
 
 
@@ -618,7 +623,7 @@ def get_compensation_EQ_params(rir: np.ndarray, sr: int, ROI: Tuple[float, float
     #plt.savefig("RFR_compensation.png",dpi=150, bbox_inches='tight')
 
     # Build parameter dictionary for downstream use (e.g., PyTorch EQ)
-    eq_param_dict = _six_biquad_eq_params_to_dict(EQ_params)
+    eq_param_dict = _seven_biquad_eq_params_to_dict(EQ_params)
 
     return {
         "eq_params": eq_param_dict,
@@ -1209,7 +1214,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
     # Compute target response
     lem_delay = get_delay_from_ir(rir_init, sr)
-    EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=6)
+    EQ_comp_dict = get_compensation_EQ_params(rir_init, sr, ROI, num_sections=7)
     target_mag_resp = EQ_comp_dict["target_response_db"]
     target_mag_freqs = EQ_comp_dict["freq_axis_smoothed"]
 
