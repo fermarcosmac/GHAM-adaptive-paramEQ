@@ -1317,7 +1317,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         h_minphase_np = minimum_phase(h_linear_np, method="homomorphic", half=False)
     delay_zeros = torch.zeros(total_delay, device=device)
     h_minphase = torch.from_numpy(h_minphase_np).float().to(device)
-    target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)
+    target_response = torch.cat([delay_zeros, h_minphase]).view(1, 1, -1)/2 # TODO 
 
     # Normalize desired response
     #target_response = target_response / target_response.abs().sum()  # match overall gain of initial RIR (since we're not optimizing gain in this experiment)
@@ -1841,13 +1841,21 @@ def process_buffers(EQG_params,
 
     # Smooth on log-frequency axis using PyTorch conv1d (moving average)
     # This gives more detail at low frequencies, less at high frequencies (perceptually uniform)
-    smooth_window = 15  # Kernel size (odd), smaller than before since we have fewer points
+    smooth_window = 15
     smooth_kernel = torch.ones(1, 1, smooth_window, device=H_mag_db.device) / smooth_window
     padding = smooth_window // 2
-    H_mag_db_log_smoothed = F.conv1d(H_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-    H_mag_db_current_log_smoothed = F.conv1d(H_mag_db_current_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-    LEM_mag_db_log_smoothed = F.conv1d(LEM_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
-    desired_mag_db_log_smoothed = F.conv1d(desired_mag_db_log.view(1, 1, -1), smooth_kernel, padding=padding).squeeze()
+
+    # Pad with reflection instead of zeros
+    padded_mag = F.pad(H_mag_db_log.view(1, 1, -1), (padding, padding), mode='reflect')
+    padded_current = F.pad(H_mag_db_current_log.view(1, 1, -1), (padding, padding), mode='reflect')
+    padded_lem = F.pad(LEM_mag_db_log.view(1, 1, -1), (padding, padding), mode='reflect')
+    padded_desired = F.pad(desired_mag_db_log.view(1, 1, -1), (padding, padding), mode='reflect')
+
+    # Apply convolution with no padding (data is already padded)
+    H_mag_db_log_smoothed = F.conv1d(padded_mag, smooth_kernel, padding=0).squeeze()
+    H_mag_db_current_log_smoothed = F.conv1d(padded_current, smooth_kernel, padding=0).squeeze()
+    LEM_mag_db_log_smoothed = F.conv1d(padded_lem, smooth_kernel, padding=0).squeeze()
+    desired_mag_db_log_smoothed = F.conv1d(padded_desired, smooth_kernel, padding=0).squeeze()
 
     # Compute loss and validation error
     match loss_type:
