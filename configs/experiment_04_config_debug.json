@@ -9,7 +9,7 @@
     "forget_factor": [0.05],
     "optim_type": ["SGD","Adam"],
     "mu_opt": {
-      "FD-MSE": [0.005, 0.1],
+      "FD-MSE": [0.0005, 0.01],
       "TD-MSE": [1.0, 0.005]
     },
     "lambda_newton": {
