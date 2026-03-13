@@ -1278,7 +1278,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         case "SGD":
             optimizer = torch.optim.SGD([EQG_params], lr=mu_opt)
         case "Adam":
-            optimizer = torch.optim.Adam([EQG_params], lr=mu_opt)
+            optimizer = torch.optim.Adam([EQG_params], lr=mu_opt, betas=(0.2, 0.7)) # TODO: debug
         case "Muon":
             raise ValueError("Muon optimizer requires newer PyTorch version.")
             optimizer = torch.optim.Muon([EQG_params], lr=mu_opt)

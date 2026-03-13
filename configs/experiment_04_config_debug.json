@@ -9,7 +9,7 @@
     "forget_factor": [0.05],
     "optim_type": ["SGD","Adam"],
     "mu_opt": {
-      "FD-MSE": [0.001, 0.001],
+      "FD-MSE": [0.01, 0.01],
       "TD-MSE": [1.0, 0.005]
     },
     "lambda_newton": {
@@ -29,8 +29,8 @@
     "debug_plot": [false]
   },
   "input": {
-    "use_white_noise": true,
-    "use_songs_folder": false,
+    "use_white_noise": false,
+    "use_songs_folder": true,
     "max_num_songs": 1,
     "max_audio_len_s": [180.0]
   }
