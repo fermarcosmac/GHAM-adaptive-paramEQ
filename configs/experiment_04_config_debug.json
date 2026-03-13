@@ -7,13 +7,13 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["SGD","Adam"],
+    "optim_type": ["Newton","Adam"],
     "mu_opt": {
-      "FD-MSE": [0.01, 0.01],
+      "FD-MSE": [1, 0.01],
       "TD-MSE": [1.0, 0.005]
     },
     "lambda_newton": {
-      "FD-MSE": 1000.0,
+      "FD-MSE": 500.0,
       "TD-MSE": 1.0
     },
     "loss_type": ["FD-MSE"],

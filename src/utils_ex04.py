@@ -1534,14 +1534,32 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 I = torch.eye(dim, device=hess.device, dtype=hess.dtype)
                 hess_reg = hess + lambda_newton * I
 
-                # Log condition number of the regularized Hessian
-                hess_cond_history.append(torch.linalg.cond(hess_reg.detach().cpu().float()).item())
-                
                 with torch.no_grad():
                     jac = jac.view(-1,1)
                     update = lstsq(hess_reg, jac).solution        # (num_params, 1)
                     step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device)
                     EQG_params -= step_sizes * update.view_as(EQG_params)
+
+                # Backtrack
+                #direction = -update.view_as(EQG_params)  # update computed from solve Hx = g
+                #alpha = 1.0
+                #c = 1e-4
+                #rho = 0.5
+                #loss0 = loss
+                #grad_dot_dir = (jac.view_as(EQG_params) * direction).sum().item()
+
+                #while alpha > 1e-6:
+                #    step_sizes = build_step_sizes(alpha, EQG_params.shape, device)
+                #    cand = EQG_params + step_sizes * direction
+                #    cand_loss = params_to_loss(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)
+                #    if cand_loss <= loss0 + c * alpha * grad_dot_dir:
+                #        EQG_params = cand
+                #        break
+                #    alpha *= rho
+
+
+                # Log condition number of the regularized Hessian
+                #hess_cond_history.append(torch.linalg.cond(hess_reg.detach().cpu().float()).item())
 
             case "GHAM-3" | "GHAM-4":
                 jac = jac_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM)

@@ -9,11 +9,11 @@
     "forget_factor": [0.05],
     "optim_type": ["GHAM-1","SGD","Adam","GHAM-3","Newton"],
     "mu_opt": {
-      "FD-MSE": [0.0005, 0.005, 0.01, 0.0005, 1],
-      "TD-MSE": [0.001, 1.0, 0.001, 0.001, 1]
+      "FD-MSE": [0.005, 0.01, 0.01, 0.005, 1],
+      "TD-MSE": [0.001, 1.0, 0.01, 0.001, 1]
     },
     "lambda_newton": {
-      "FD-MSE": 10000.0,
+      "FD-MSE": 500.0,
       "TD-MSE": 10.0
     },
     "loss_type": ["FD-MSE", "TD-MSE"],
