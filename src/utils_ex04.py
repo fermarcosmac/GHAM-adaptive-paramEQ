@@ -1291,6 +1291,8 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 case "TD-SE" | "FD-SE":
                     jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
         case "Newton" | "GHAM-3" | "GHAM-4":
+            alpha_ridge = 1e-3
+            ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
                     jac_fcn = jacrev(params_to_loss, argnums=0, has_aux=False)
@@ -1503,10 +1505,6 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 loss_val = torch.maximum(loss.detach() - torch.tensor(eps_0, device=device), torch.tensor(0.0, device=device))
                 
                 # TODO: handle possible ill_conditioning of Jacobian/Hessian
-                try:
-                    ill = torch.linalg.cond(jac.detach().cpu().float()).item() > 1e6
-                except:
-                    ill = True
 
                 # Log irreducible loss and jacobian condition number
                 irreducible_loss_history.append(loss_val.mean().item())
@@ -1514,10 +1512,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 
                 with torch.no_grad():
                     b = loss_val.view(-1,1)                # (loss_dims, 1)
-                    update = lstsq(jac, b).solution        # (num_params, 1)
-                    update = torch.zeros_like(update) if ill else update  # if ill-conditioned, skip update (equivalent to very small step size)
-                    #ridge_regressor.fit(jac,b)
-                    #update = ridge_regressor.w
+                    #update = lstsq(jac, b).solution        # (num_params, 1)
+                    ridge_regressor.fit(jac,b)
+                    update = ridge_regressor.w
                     if optim_type == "GHAM-1":
                         step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device)
                         EQG_params -= step_sizes * update.view_as(EQG_params)
@@ -1577,16 +1574,19 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
 
                 with torch.no_grad():
                     step_sizes = build_step_sizes(mu_opt, EQG_params.shape, device).T
-                    theta_1 = -step_sizes * lstsq(jac, loss_val).solution
+                    #theta_1 = -step_sizes * lstsq(jac, loss_val).solution
+                    theta_1 = -step_sizes * ridge_regressor.fit(jac, loss_val).w
                     theta_2 = (1-step_sizes)*theta_1
                     residual_3 = theta_1.T@hess@theta_1 + jac@theta_2
-                    theta_3 = theta_2 + -step_sizes * lstsq(jac,residual_3).solution
+                    #theta_3 = theta_2 + -step_sizes * lstsq(jac,residual_3).solution
+                    theta_3 = theta_2 + -step_sizes * ridge_regressor.fit(jac, residual_3).w
                     if optim_type == "GHAM-3":
                         correction = theta_1 + theta_2 + theta_3
                     elif optim_type == "GHAM-4":
                         jac3 = jac3_fcn(EQG_params,in_buffer,EQ_out_buffer,LEM_out_buffer,est_mag_response_buffer,est_cpx_response_buffer,EQ,G,LEM,frame_len,hop_len,target_frame,target_response,forget_factor,loss_fcn,loss_type,sr,ROI,use_true_LEM).squeeze()
                         residual_4 = -step_sizes * (torch.einsum("ijk,i,j,k->", jac3, theta_1.squeeze(), theta_2.squeeze(), theta_3.squeeze())/6 + theta_2.T@hess@theta_1 + jac@theta_3)
-                        theta_4 = theta_3 + lstsq(jac,residual_4).solution
+                        #theta_4 = theta_3 + lstsq(jac,residual_4).solution
+                        theta_4 = theta_3 + ridge_regressor.fit(jac, residual_4).w
                         correction = theta_1 + theta_2 + theta_3 + theta_4
                     EQG_params += correction.view_as(EQG_params)
             case _:
