@@ -7,16 +7,16 @@
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["GHAM-1"],
+    "optim_type": ["SGD","Adam"],
     "mu_opt": {
-      "FD-MSE": [0.0005],
-      "TD-MSE": [0.001]
+      "FD-MSE": [0.005, 0.1],
+      "TD-MSE": [1.0, 0.005]
     },
     "lambda_newton": {
-      "FD-MSE": 10000.0,
-      "TD-MSE": 10.0
+      "FD-MSE": 1000.0,
+      "TD-MSE": 1.0
     },
-    "loss_type": ["FD-MSE", "TD-MSE"],
+    "loss_type": ["FD-MSE"],
     "eps_0": {
       "FD-MSE": 1.0,
       "TD-MSE": 0.0
