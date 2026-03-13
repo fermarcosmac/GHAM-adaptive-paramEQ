@@ -1,5 +1,5 @@
 {
-  "experiment_name": "experiment_04_ALL_SONGS_MOVING_POSITION",
+  "experiment_name": "experiment_04_WHITE_NOISE_MOVING_POSITION",
   "scenario": "moving_position",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
@@ -29,8 +29,8 @@
     "debug_plot": [false]
   },
   "input": {
-    "use_white_noise": false,
-    "use_songs_folder": true,
+    "use_white_noise": true,
+    "use_songs_folder": false,
     "max_num_songs": 12,
     "max_audio_len_s": [180.0]
   }
