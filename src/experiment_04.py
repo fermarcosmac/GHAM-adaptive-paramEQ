@@ -43,7 +43,7 @@ def _song_stem(input_spec) -> str:
 def main() -> None:
 
     # Load configuration
-    config_path = root / "configs" / "experiment_04_config_debug.json"
+    config_path = root / "configs" / "experiment_04_config.json"
     cfg = load_config(config_path)
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
