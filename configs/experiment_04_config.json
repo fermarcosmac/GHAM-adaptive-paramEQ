@@ -1,6 +1,6 @@
 {
-  "experiment_name": "experiment_04_ALL_SONGS_MOVING_POSITION",
-  "scenario": "moving_position",
+  "experiment_name": "experiment_04_WHITE_NOISE_MOVING_PERSON",
+  "scenario": "moving_person",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
     "frame_len": [8192],
@@ -9,14 +9,14 @@
     "forget_factor": [0.05],
     "optim_type": ["GHAM-1","SGD","Adam","GHAM-3","Newton"],
     "mu_opt": {
-      "FD-MSE": [0.0005, 0.005, 0.002, 0.0005, 1.0],
+      "FD-MSE": [0.005, 0.005, 0.005, 0.005, 1.0],
       "TD-MSE": [0.0005, 0.005, 0.002, 0.0005, 1.0]
     },
     "lambda_newton": {
       "FD-MSE": 700.0,
       "TD-MSE": 1.0
     },
-    "loss_type": ["FD-MSE","TD-MSE"],
+    "loss_type": ["FD-MSE"],
     "eps_0": {
       "FD-MSE": 1.0,
       "TD-MSE": 0.0
@@ -29,8 +29,8 @@
     "debug_plot": [false]
   },
   "input": {
-    "use_white_noise": false,
-    "use_songs_folder": true,
+    "use_white_noise": true,
+    "use_songs_folder": false,
     "max_num_songs": 12,
     "max_audio_len_s": [180.0]
   }

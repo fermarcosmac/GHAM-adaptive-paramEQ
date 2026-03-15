@@ -1225,6 +1225,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     EQ = ParametricEQ(sample_rate=sr)
     #init_params_tensor = torch.rand(1,EQ.num_params)
     init_params_tensor = torch.ones(1,EQ.num_params)*0.5
+    init_params_tensor[0, [3, 6, 9, 12, 15]] = 1.0
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)
@@ -1278,12 +1279,12 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         case "SGD":
             optimizer = torch.optim.SGD([EQG_params], lr=mu_opt)
         case "Adam":
-            optimizer = torch.optim.Adam([EQG_params], lr=mu_opt, betas=(0.9, 0.999)) # TODO: debug
+            optimizer = torch.optim.Adam([EQG_params], lr=mu_opt, betas=(0.9, 0.99999)) # TODO: debug
         case "Muon":
             raise ValueError("Muon optimizer requires newer PyTorch version.")
             optimizer = torch.optim.Muon([EQG_params], lr=mu_opt)
         case "GHAM-1" | "GHAM-2":
-            alpha_ridge = 1e-1
+            alpha_ridge = 5e0
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
                 case "TD-MSE" | "FD-MSE":
@@ -1291,7 +1292,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
                 case "TD-SE" | "FD-SE":
                     jac_fcn = jacfwd(params_to_loss, argnums=0, has_aux=False)
         case "Newton" | "GHAM-3" | "GHAM-4":
-            alpha_ridge = 1e-1
+            alpha_ridge = 5e0
             ridge_regressor = Ridge(alpha = alpha_ridge, fit_intercept = False)
             match loss_type:
                 case "TD-MSE" | "FD-MSE":

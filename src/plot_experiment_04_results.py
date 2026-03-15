@@ -140,7 +140,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                 ax_loss.set_title(f"{lt} — Training loss")
                 ax_val.set_title(f"{lt} — Validation error")
 
-            ax_val.axhline(y=1.0, color="dimgray", linestyle="--", linewidth=1.0, alpha=0.6)
+            ax_val.axhline(y=1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
             _add_transitions(ax_val, tt)
             _add_transitions(ax_loss, tt)
 
@@ -287,7 +287,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_ALL_SONGS_MOVING_POSITION"
+    experiment_name = "experiment_04_WHITE_NOISE_MOVING_POSITION"
 
     # Project root (same convention as experiment_04.py)
     root = Path(__file__).resolve().parents[1]

@@ -21,26 +21,20 @@
       0.05
     ],
     "optim_type": [
-      "GHAM-1",
       "SGD",
       "Adam",
-      "GHAM-3",
-      "Newton"
+      "GHAM-1"
     ],
     "mu_opt": {
       "FD-MSE": [
-        0.0005,
         0.005,
-        0.002,
-        0.0005,
-        1
+        0.005,
+        0.005
       ],
       "TD-MSE": [
-        0.005,
         1.0,
         0.01,
-        0.001,
-        1
+        0.01
       ]
     },
     "lambda_newton": {
@@ -64,7 +58,6 @@
       4
     ],
     "transition_time_s": [
-      1.0,
       15.0,
       30.0
     ],
@@ -76,9 +69,9 @@
     ]
   },
   "input": {
-    "use_white_noise": true,
-    "use_songs_folder": false,
-    "max_num_songs": 12,
+    "use_white_noise": false,
+    "use_songs_folder": true,
+    "max_num_songs": 1,
     "max_audio_len_s": [
       180.0
     ]
