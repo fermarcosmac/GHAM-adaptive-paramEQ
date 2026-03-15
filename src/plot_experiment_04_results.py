@@ -287,7 +287,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_WHITE_NOISE_MOVING_POSITION"
+    experiment_name = "experiment_04_WHITE_NOISE_MOVING_PERSON"
 
     # Project root (same convention as experiment_04.py)
     root = Path(__file__).resolve().parents[1]

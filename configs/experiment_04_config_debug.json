@@ -3,14 +3,14 @@
   "scenario": "moving_position",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
-    "frame_len": [2],
-    "hop_len": [2],
+    "frame_len": [8192],
+    "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
     "optim_type": ["SGD"],
     "mu_opt": {
       "FD-MSE": [0.005],
-      "TD-MSE": [1.0]
+      "TD-MSE": [0.1]
     },
     "lambda_newton": {
       "FD-MSE": 700.0,
