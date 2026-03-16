@@ -1,22 +1,22 @@
 {
-  "experiment_name": "experiment_04_WHITE_NOISE_FxLMS",
-  "scenario": "moving_position",
+  "experiment_name": "experiment_04_DEBUG",
+  "scenario": "moving_person",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
     "frame_len": [8192],
     "hop_len": [8192],
     "window_type": [null],
     "forget_factor": [0.05],
-    "optim_type": ["SGD"],
+    "optim_type": ["SGD","GHAM-1","Adam","GHAM-3","Newton"],
     "mu_opt": {
-      "FD-MSE": [0.005],
-      "TD-MSE": [0.1]
+      "FD-MSE": [0.005, 0.005, 0.005, 0.005, 1.0],
+      "TD-MSE": [0.0005, 0.005, 0.002, 0.0005, 1.0]
     },
     "lambda_newton": {
       "FD-MSE": 700.0,
       "TD-MSE": 1.0
     },
-    "loss_type": ["TD-MSE"],
+    "loss_type": ["FD-MSE"],
     "eps_0": {
       "FD-MSE": 1.0,
       "TD-MSE": 0.0
@@ -32,6 +32,6 @@
     "use_white_noise": true,
     "use_songs_folder": false,
     "max_num_songs": 1,
-    "max_audio_len_s": [180.0]
+    "max_audio_len_s": [240.0]
   }
 }

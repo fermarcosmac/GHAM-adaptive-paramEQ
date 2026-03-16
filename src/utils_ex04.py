@@ -1235,7 +1235,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     # Combine EQ params and gain into one parameter vector: EQG_params = [EQ_params | G_param]
     # EQ_params occupies EQG_params[:, :-1], G_param (dB) occupies EQG_params[:, -1:]
     EQG_params = torch.nn.Parameter(
-        torch.cat([init_params_tensor.clone(), 5*torch.ones(1, 1)], dim=-1).to(device)
+        torch.cat([init_params_tensor.clone(), torch.zeros(1, 1)], dim=-1).to(device)
     )
 
     # Load/synthesise the input audio (as torch tensors)
