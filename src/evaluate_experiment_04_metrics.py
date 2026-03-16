@@ -1,0 +1,538 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+import re
+import tempfile
+from typing import Callable
+from uuid import uuid4
+
+from aquatk.metrics.PEAQ.peaq_basic import process_audio_files as peaq_process_files
+import matplotlib as mpl
+import matplotlib.pyplot as plt
+import numpy as np
+import scipy.io.wavfile as wavfile
+
+# Use LaTeX-style mathtext for figure text and numbers
+mpl.rcParams.update(
+    {
+        "font.family": "serif",
+        "mathtext.fontset": "cm",
+        "axes.formatter.use_mathtext": True,
+    }
+)
+
+# -----------------------------------------------------------------------------
+# Configuration
+# -----------------------------------------------------------------------------
+EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
+MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
+WINDOW_SECONDS = 20.0  # no-overlap sliding window length
+MAX_PLOTTED_ERRORBARS = 12
+
+# -----------------------------------------------------------------------------
+# Metric placeholders (replace with your final implementations later)
+# Each function must take (reference, degraded, sf) and return a float.
+# -----------------------------------------------------------------------------
+
+
+def _safe_rmse_proxy(reference: np.ndarray, degraded: np.ndarray) -> float:
+    n = min(reference.shape[0], degraded.shape[0])
+    if n == 0:
+        return np.nan
+    err = reference[:n] - degraded[:n]
+    return float(np.sqrt(np.mean(err**2) + 1e-12))
+
+
+_PEAQ_TMP_DIR = Path(tempfile.mkdtemp(prefix="peaq_windows_"))
+
+
+def _write_chunk_wav(path: Path, x: np.ndarray, sr: int) -> None:
+    # Write int16 PCM to maximize compatibility with file-based metric implementations.
+    x = np.asarray(x, dtype=np.float32)
+    x = np.clip(x, -1.0, 1.0)
+    x_i16 = np.round(x * 32767.0).astype(np.int16)
+    wavfile.write(str(path), int(sr), x_i16)
+
+
+def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    n = min(reference.shape[0], degraded.shape[0])
+    if n == 0:
+        return np.nan
+
+    ref_chunk = reference[:n]
+    deg_chunk = degraded[:n]
+    sr = int(round(float(sf)))
+
+    uid = uuid4().hex
+    ref_path = _PEAQ_TMP_DIR / f"ref_{uid}.wav"
+    deg_path = _PEAQ_TMP_DIR / f"deg_{uid}.wav"
+
+    _write_chunk_wav(ref_path, ref_chunk, sr)
+    _write_chunk_wav(deg_path, deg_chunk, sr)
+
+    try:
+        result = peaq_process_files(str(ref_path), str(deg_path))
+        avg_ODG = np.mean(result["ODG_list"])
+        return avg_ODG
+    except:
+        return float(-4.0) # Worst ODG fallback
+    finally:
+        for p in (ref_path, deg_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def metric_si_sdr(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_mrstft_error(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_spectral_centroid_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_spectral_bandwidth_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_spectral_flatness_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_rmse(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_lufs_difference(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+def metric_crest_factor_difference(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return _safe_rmse_proxy(reference, degraded)
+
+
+METRICS: dict[str, Callable[[np.ndarray, np.ndarray, float], float]] = {
+    "PEAQ": metric_peaq,
+    "SI-SDR": metric_si_sdr,
+    "MR-STFT Error": metric_mrstft_error,
+    "Mel Spectral Distance": metric_mel_spectral_distance,
+    "Spectral Centroid Delta": metric_spectral_centroid_delta,
+    "Spectral Bandwidth Delta": metric_spectral_bandwidth_delta,
+    "Spectral Flatness Delta": metric_spectral_flatness_delta,
+    "RMSE": metric_rmse,
+    "LUFS Difference": metric_lufs_difference,
+    "Crest Factor Difference": metric_crest_factor_difference,
+}
+
+
+@dataclass(frozen=True)
+class EqCondition:
+    optimizer: str
+    loss: str
+    transition_token: str
+    transition_seconds: float
+
+
+EQ_FILENAME_RE = re.compile(
+    r"^EQ_(?P<optimizer>.+)_(?P<loss>FD_MSE|TD_MSE)_tt(?P<tt>[^_]+)_(?P<song>.+)$"
+)
+
+
+@dataclass
+class ParsedFiles:
+    desired: dict[str, Path]
+    noeq: dict[str, Path]
+    eq: dict[tuple[str, EqCondition], Path]
+
+
+def parse_transition_seconds(tt_token: str) -> float:
+    # Stored as e.g. "1p0" in filenames.
+    try:
+        return float(tt_token.replace("p", "."))
+    except ValueError:
+        return float("nan")
+
+
+def normalize_loss_label(loss_token: str) -> str:
+    if loss_token == "FD_MSE":
+        return "FD-MSE"
+    if loss_token == "TD_MSE":
+        return "TD-MSE"
+    return loss_token
+
+
+def load_audio_mono(path: Path) -> tuple[np.ndarray, int]:
+    sr, data = wavfile.read(str(path))
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if np.issubdtype(data.dtype, np.integer):
+        peak = np.iinfo(data.dtype).max
+        data = data.astype(np.float32) / float(max(peak, 1))
+    else:
+        data = data.astype(np.float32)
+    return data, int(sr)
+
+
+def parse_output_directory(output_dir: Path) -> ParsedFiles:
+    desired: dict[str, Path] = {}
+    noeq: dict[str, Path] = {}
+    eq: dict[tuple[str, EqCondition], Path] = {}
+
+    for wav_path in sorted(output_dir.glob("*.wav")):
+        stem = wav_path.stem
+
+        if stem.startswith("desired_"):
+            song = stem[len("desired_") :]
+            desired[song] = wav_path
+            continue
+
+        if stem.startswith("noEQ_"):
+            song = stem[len("noEQ_") :]
+            noeq[song] = wav_path
+            continue
+
+        match = EQ_FILENAME_RE.match(stem)
+        if match is None:
+            continue
+
+        optimizer = match.group("optimizer")
+        loss = normalize_loss_label(match.group("loss"))
+        tt_token = match.group("tt")
+        transition_seconds = parse_transition_seconds(tt_token)
+        song = match.group("song")
+
+        cond = EqCondition(
+            optimizer=optimizer,
+            loss=loss,
+            transition_token=tt_token,
+            transition_seconds=transition_seconds,
+        )
+        eq[(song, cond)] = wav_path
+
+    return ParsedFiles(desired=desired, noeq=noeq, eq=eq)
+
+
+def mode_song_filter(song_name: str) -> bool:
+    if MODE == "ALL_SONGS":
+        return True
+    if MODE == "WHITE_NOISE":
+        return "white_noise" in song_name.lower()
+    raise ValueError(f"Unsupported MODE={MODE}. Use ALL_SONGS or WHITE_NOISE.")
+
+
+def compute_windowed_metric(
+    reference: np.ndarray,
+    degraded: np.ndarray,
+    sr: int,
+    window_seconds: float,
+    metric_fn: Callable[[np.ndarray, np.ndarray, float], float],
+) -> np.ndarray:
+    n = min(reference.shape[0], degraded.shape[0])
+    if n <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    window_len = int(round(window_seconds * sr))
+    if window_len <= 0:
+        raise ValueError("WINDOW_SECONDS must result in at least one sample per window.")
+
+    n_windows = n // window_len
+    if n_windows == 0:
+        return np.zeros(0, dtype=np.float32)
+
+    out = np.empty(n_windows, dtype=np.float32)
+    for i in range(n_windows):
+        start = i * window_len
+        end = start + window_len
+        out[i] = metric_fn(reference[start:end], degraded[start:end], float(sr))
+    return out
+
+
+def align_and_stack(series_list: list[np.ndarray]) -> np.ndarray:
+    valid = [s for s in series_list if s.size > 0 and np.isfinite(s).any()]
+    if not valid:
+        return np.zeros((0, 0), dtype=np.float32)
+    min_len = min(s.shape[0] for s in valid)
+    return np.stack([s[:min_len] for s in valid], axis=0)
+
+
+def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
+    songs = sorted(set(parsed.desired.keys()) & set(parsed.noeq.keys()))
+    songs = [s for s in songs if mode_song_filter(s)]
+
+    if not songs:
+        raise RuntimeError(
+            f"No songs available in mode {MODE}. Check files in: {output_dir}"
+        )
+
+    # Metric values per song and condition
+    # noeq_metrics[metric][song] -> np.ndarray(time)
+    noeq_metrics: dict[str, dict[str, np.ndarray]] = {name: {} for name in METRICS}
+
+    # eq_metrics[metric][(cond, song)] -> np.ndarray(time)
+    eq_metrics: dict[str, dict[tuple[EqCondition, str], np.ndarray]] = {
+        name: {} for name in METRICS
+    }
+
+    all_conditions = sorted(
+        {cond for (song, cond) in parsed.eq.keys() if song in songs},
+        key=lambda c: (c.transition_seconds, c.loss, c.optimizer),
+    )
+
+    if not all_conditions:
+        raise RuntimeError(f"No EQ files found in: {output_dir}")
+
+    print(f"Mode: {MODE}")
+    print(f"Experiment output directory: {output_dir}")
+    print(f"Songs selected: {len(songs)}")
+    for s in songs:
+        print(f"  - {s}")
+
+    for song in songs:
+        desired, sr_ref = load_audio_mono(parsed.desired[song])
+        noeq, sr_noeq = load_audio_mono(parsed.noeq[song])
+        if sr_ref != sr_noeq:
+            raise RuntimeError(
+                f"Sample-rate mismatch for song {song}: desired={sr_ref}, noEQ={sr_noeq}"
+            )
+
+        for metric_name, metric_fn in METRICS.items():
+            noeq_metrics[metric_name][song] = compute_windowed_metric(
+                reference=desired,
+                degraded=noeq,
+                sr=sr_ref,
+                window_seconds=WINDOW_SECONDS,
+                metric_fn=metric_fn,
+            )
+
+        for cond in all_conditions:
+            eq_path = parsed.eq.get((song, cond), None)
+            if eq_path is None:
+                continue
+
+            eq_audio, sr_eq = load_audio_mono(eq_path)
+            if sr_eq != sr_ref:
+                raise RuntimeError(
+                    f"Sample-rate mismatch for song {song}, condition {cond}: "
+                    f"desired={sr_ref}, EQ={sr_eq}"
+                )
+
+            for metric_name, metric_fn in METRICS.items():
+                eq_metrics[metric_name][(cond, song)] = compute_windowed_metric(
+                    reference=desired,
+                    degraded=eq_audio,
+                    sr=sr_ref,
+                    window_seconds=WINDOW_SECONDS,
+                    metric_fn=metric_fn,
+                )
+
+    return {
+        "songs": songs,
+        "conditions": all_conditions,
+        "noeq_metrics": noeq_metrics,
+        "eq_metrics": eq_metrics,
+    }
+
+
+def aggregate_for_plot(results: dict) -> dict:
+    songs: list[str] = results["songs"]
+    conditions: list[EqCondition] = results["conditions"]
+    noeq_metrics: dict[str, dict[str, np.ndarray]] = results["noeq_metrics"]
+    eq_metrics: dict[str, dict[tuple[EqCondition, str], np.ndarray]] = results["eq_metrics"]
+
+    unique_losses = sorted({c.loss for c in conditions})
+    unique_tt = sorted({c.transition_token for c in conditions}, key=lambda t: parse_transition_seconds(t))
+    unique_optimizers = sorted({c.optimizer for c in conditions})
+
+    aggregate: dict = {
+        "songs": songs,
+        "losses": unique_losses,
+        "transition_tokens": unique_tt,
+        "optimizers": unique_optimizers,
+        "metrics": {},
+    }
+
+    for metric_name in METRICS:
+        metric_payload = {
+            "noeq": {"mean": None, "std": None, "time_s": None},
+            "eq": {},
+        }
+
+        noeq_stack = align_and_stack([noeq_metrics[metric_name][song] for song in songs if song in noeq_metrics[metric_name]])
+        if noeq_stack.size > 0:
+            noeq_mean = np.mean(noeq_stack, axis=0)
+            noeq_std = np.std(noeq_stack, axis=0)
+            noeq_time = np.arange(noeq_mean.shape[0], dtype=float) * WINDOW_SECONDS
+            metric_payload["noeq"] = {
+                "mean": noeq_mean,
+                "std": noeq_std,
+                "time_s": noeq_time,
+            }
+
+        for cond in conditions:
+            series = [eq_metrics[metric_name][(cond, song)] for song in songs if (cond, song) in eq_metrics[metric_name]]
+            stack = align_and_stack(series)
+            if stack.size == 0:
+                continue
+            mean_curve = np.mean(stack, axis=0)
+            std_curve = np.std(stack, axis=0)
+            time_axis = np.arange(mean_curve.shape[0], dtype=float) * WINDOW_SECONDS
+            metric_payload["eq"][cond] = {
+                "mean": mean_curve,
+                "std": std_curve,
+                "time_s": time_axis,
+                "n_songs": stack.shape[0],
+            }
+
+        aggregate["metrics"][metric_name] = metric_payload
+
+    return aggregate
+
+
+def plot_aggregated_metrics(aggregate: dict) -> None:
+    losses: list[str] = aggregate["losses"]
+    transition_tokens: list[str] = aggregate["transition_tokens"]
+    optimizers: list[str] = aggregate["optimizers"]
+    metrics_payload: dict = aggregate["metrics"]
+    metric_names = list(metrics_payload.keys())
+
+    color_map = plt.get_cmap("tab10")
+    optimizer_colors = {opt: color_map(i % 10) for i, opt in enumerate(optimizers)}
+
+    n_rows = max(1, len(transition_tokens))
+    n_cols = max(1, len(metric_names))
+
+    for loss in losses:
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(3.4 * n_cols, 2.8 * n_rows),
+            squeeze=False,
+            sharex=True,
+            sharey=False,
+        )
+
+        for r, tt in enumerate(transition_tokens):
+            tt_seconds = parse_transition_seconds(tt)
+
+            for c, metric_name in enumerate(metric_names):
+                payload = metrics_payload[metric_name]
+                ax = axes[r, c]
+                noeq_mean = payload["noeq"]["mean"]
+                noeq_std = payload["noeq"]["std"]
+                noeq_time = payload["noeq"]["time_s"]
+
+                if r == 0:
+                    ax.set_title(metric_name)
+
+                if noeq_mean is not None and noeq_time is not None:
+                    ax.plot(
+                        noeq_time,
+                        noeq_mean,
+                        color="black",
+                        linestyle="--",
+                        linewidth=1.0,
+                        alpha=0.9,
+                        label="noEQ" if (r == 0 and c == 0) else None,
+                    )
+                    if noeq_std is not None:
+                        ax.fill_between(
+                            noeq_time,
+                            noeq_mean - noeq_std,
+                            noeq_mean + noeq_std,
+                            color="gray",
+                            alpha=0.2,
+                        )
+
+                plotted_any = False
+                for optimizer in optimizers:
+                    condition_match = [
+                        cond
+                        for cond in payload["eq"].keys()
+                        if cond.optimizer == optimizer
+                        and cond.loss == loss
+                        and cond.transition_token == tt
+                    ]
+                    if not condition_match:
+                        continue
+
+                    cond = condition_match[0]
+                    curve = payload["eq"][cond]
+                    t = curve["time_s"]
+                    m = curve["mean"]
+                    s = curve["std"]
+
+                    ax.plot(
+                        t,
+                        m,
+                        color=optimizer_colors[optimizer],
+                        linewidth=1.2,
+                        alpha=0.95,
+                        label=optimizer if (r == 0 and c == 0) else None,
+                    )
+
+                    n_markers = min(MAX_PLOTTED_ERRORBARS, t.shape[0])
+                    if n_markers > 0:
+                        idx = np.linspace(0, t.shape[0] - 1, num=n_markers, dtype=int)
+                        ax.errorbar(
+                            t[idx],
+                            m[idx],
+                            yerr=s[idx],
+                            fmt="none",
+                            ecolor=optimizer_colors[optimizer],
+                            elinewidth=1.0,
+                            capsize=2,
+                            alpha=0.6,
+                        )
+
+                    plotted_any = True
+
+                ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
+                if r == n_rows - 1:
+                    ax.set_xlabel("Time [s]")
+                if c == 0:
+                    ax.set_ylabel(f"tt={tt_seconds:.1f} s")
+                if not plotted_any and (noeq_mean is None):
+                    ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            axes[0, 0].legend(handles, labels, fontsize=7, loc="best")
+
+        mode_suffix = "(white noise)" if MODE == "WHITE_NOISE" else "(all songs avg)"
+        fig.suptitle(f"Loss: {loss} {mode_suffix}", y=1.01)
+        plt.tight_layout()
+
+    plt.show()
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parents[1]
+    output_dir = root / "data" / "audio" / "output" / EXPERIMENT_NAME
+
+    if not output_dir.exists():
+        raise FileNotFoundError(f"Output folder not found: {output_dir}")
+
+    parsed = parse_output_directory(output_dir)
+    results = compute_all_metrics(parsed, output_dir)
+    aggregate = aggregate_for_plot(results)
+
+    print("\nSummary:")
+    print(f"  Conditions found: {len(aggregate['optimizers'])} optimizers, "
+          f"{len(aggregate['losses'])} losses, "
+          f"{len(aggregate['transition_tokens'])} transition times")
+    print(f"  Metrics computed: {len(METRICS)}")
+    plot_aggregated_metrics(aggregate)
+
+
+if __name__ == "__main__":
+    main()
