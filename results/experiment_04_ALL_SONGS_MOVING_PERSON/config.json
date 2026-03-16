@@ -80,7 +80,7 @@
     "use_songs_folder": true,
     "max_num_songs": 12,
     "max_audio_len_s": [
-      180.0
+      240.0
     ]
   }
 }
