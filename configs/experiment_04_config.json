@@ -1,6 +1,6 @@
 {
-  "experiment_name": "experiment_04_ALL_SONGS_MOVING_POSITION",
-  "scenario": "moving_position",
+  "experiment_name": "experiment_04_ALL_SONGS_MOVING_PERSON",
+  "scenario": "moving_person",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
     "frame_len": [8192],
