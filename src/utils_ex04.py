@@ -1,4 +1,4 @@
-import json, itertools, random, sys, math, torch, torchaudio, warnings
+import json, itertools, random, sys, math, time, torch, torchaudio, warnings
 from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root))
@@ -1162,6 +1162,7 @@ def build_step_sizes(mu_opt: float, EQG_params_shape: torch.Size, device: torch.
 def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[str, Any]]) -> None:
     """ Code to run the ARE experiment given the configuration and inpput specifications
     """
+    exp_t_start = time.perf_counter()
     mode, info = input_spec
     print("\n=== Running control experiment ===")
     print(f"Mode: {mode}")
@@ -1625,6 +1626,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         y_control_np = y_control.squeeze().cpu().numpy().astype(np.float32)
         y_noEQ_np = y_noEQ.squeeze().cpu().numpy().astype(np.float32)
 
+    total_compute_time_s = time.perf_counter() - exp_t_start
+    avg_compute_time_per_frame_s = total_compute_time_s / n_frames if n_frames > 0 else float("nan")
+
     result = {
         "loss_history": np.array(loss_history, dtype=float),
         "validation_error_history": np.array(validation_error_history, dtype=float),
@@ -1637,6 +1641,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         "y_control": y_control_np,
         "y_noEQ": y_noEQ_np,
         "sr": int(sr),
+        "n_frames": int(n_frames),
+        "control_experiment_time_s": float(total_compute_time_s),
+        "avg_compute_time_per_frame_s": float(avg_compute_time_per_frame_s),
     }
     if checkpoint_states:
         result["checkpoints"] = checkpoint_states
