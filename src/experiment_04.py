@@ -136,6 +136,7 @@ def main() -> None:
     # -----------------------------------------------------------------------
     curves = defaultdict(list)        # (tt, optim, lt) -> [(time_axis, val_hist), ...]
     loss_curves = defaultdict(list)   # (tt, optim, lt) -> [(time_axis, loss_hist), ...]
+    compute_time_stats = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
     tt_transitions = {}               # tt -> list of (start_s, end_s)
     input_ids_used = set()
     checkpoint_examples = defaultdict(dict)  # lt -> {optim: [cp, ...]}
@@ -233,6 +234,14 @@ def main() -> None:
                 if loss_hist.size:
                     loss_curves[(tt, optim_used, loss_type_used)].append((time_axis, loss_hist))
 
+                # Aggregate compute-time statistics per (transition_time_s, optimizer)
+                total_time_s = float(result.get("control_experiment_time_s", 0.0))
+                n_frames = int(result.get("n_frames", 0))
+                ct_key = (tt, optim_used)
+                compute_time_stats[ct_key]["total_time_s"] += total_time_s
+                compute_time_stats[ct_key]["total_frames"] += n_frames
+                compute_time_stats[ct_key]["num_runs"] += 1
+
                 if tt not in tt_transitions:
                     tt_transitions[tt] = result.get("transition_times", None)
 
@@ -278,6 +287,7 @@ def main() -> None:
     plot1_data = {
         "curves":             dict(curves),
         "loss_curves":        dict(loss_curves),
+        "compute_time_stats": dict(compute_time_stats),
         "tt_transitions":     tt_transitions,
         "input_signals":      sorted(input_ids_used),
         # checkpoint_examples: {loss_type: {optim_type: [cp, ...]}}

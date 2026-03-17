@@ -37,6 +37,7 @@ def load_results(experiment_name: str, root: Path) -> tuple[dict, dict]:
 def plot_results(cfg: dict, plot1_data: dict) -> None:
     curves = plot1_data["curves"]
     loss_curves = plot1_data.get("loss_curves", {})
+    compute_time_stats = plot1_data.get("compute_time_stats", {})
     tt_transitions = plot1_data.get("tt_transitions", {})
     input_signals = plot1_data.get("input_signals", None)
     checkpoint_examples = plot1_data.get("checkpoint_examples", {})
@@ -69,6 +70,56 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
         for sig in input_signals:
             print(f"  {sig}")
         print()
+
+    # ------------------------------------------------------------------
+    # Compute-time table: rows = transition_time_s, cols = optimizer
+    # Each cell reports average compute time per frame [s/frame]
+    # ------------------------------------------------------------------
+    if compute_time_stats:
+        compute_time_table = np.full((len(unique_tt), len(optim_types)), np.nan, dtype=float)
+        for tt_i, tt in enumerate(unique_tt):
+            for opt_i, opt in enumerate(optim_types):
+                stats = compute_time_stats.get((tt, opt), None)
+                if not stats:
+                    continue
+                total_frames = int(stats.get("total_frames", 0))
+                total_time_s = float(stats.get("total_time_s", 0.0))
+                if total_frames > 0:
+                    compute_time_table[tt_i, opt_i] = total_time_s / total_frames
+
+        print("Average compute time per frame [s/frame] (rows=transition_time_s, cols=optimizer):")
+        header = "transition_time_s" + "".join(f"\t{opt}" for opt in optim_types)
+        print(header)
+        for tt_i, tt in enumerate(unique_tt):
+            row_vals = []
+            for opt_i in range(len(optim_types)):
+                v = compute_time_table[tt_i, opt_i]
+                row_vals.append(f"{v:.6f}" if np.isfinite(v) else "nan")
+            print(f"{tt}\t" + "\t".join(row_vals))
+        print()
+
+        # Plot timing table in a dedicated figure for quick visual comparison
+        fig_time, ax_time = plt.subplots(
+            figsize=(max(6.0, 1.2 * len(optim_types) + 2.0), max(2.5, 0.6 * len(unique_tt) + 1.8))
+        )
+        ax_time.axis("off")
+        table_cell_text = [
+            [f"{v:.6f}" if np.isfinite(v) else "-" for v in row]
+            for row in compute_time_table
+        ]
+        table_row_labels = [f"tt={tt}s" for tt in unique_tt]
+        timing_table = ax_time.table(
+            cellText=table_cell_text,
+            rowLabels=table_row_labels,
+            colLabels=optim_types,
+            cellLoc="center",
+            loc="center",
+        )
+        timing_table.auto_set_font_size(False)
+        timing_table.set_fontsize(8)
+        timing_table.scale(1.0, 1.2)
+        ax_time.set_title("Average compute time per frame [s/frame]")
+        fig_time.tight_layout()
 
     # ------------------------------------------------------------------
     # Combined figure: validation error + training loss for every
