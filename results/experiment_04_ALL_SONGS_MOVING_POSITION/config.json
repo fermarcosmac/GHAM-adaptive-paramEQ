@@ -29,10 +29,10 @@
     ],
     "mu_opt": {
       "FD-MSE": [
+        0.001,
+        0.001,
         0.005,
-        0.005,
-        0.005,
-        0.005,
+        0.001,
         1.0
       ],
       "TD-MSE": [
@@ -44,7 +44,7 @@
       ]
     },
     "lambda_newton": {
-      "FD-MSE": 700.0,
+      "FD-MSE": 1000.0,
       "TD-MSE": 1.0
     },
     "loss_type": [
@@ -80,7 +80,7 @@
     "use_songs_folder": true,
     "max_num_songs": 12,
     "max_audio_len_s": [
-      240.0
+      180.0
     ]
   }
 }
