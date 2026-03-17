@@ -48,11 +48,11 @@ _PEAQ_TMP_DIR = Path(tempfile.mkdtemp(prefix="peaq_windows_"))
 
 
 def _write_chunk_wav(path: Path, x: np.ndarray, sr: int) -> None:
-    # Write int16 PCM to maximize compatibility with file-based metric implementations.
+    # Write int32 PCM to maximize compatibility with file-based metric implementations.
     x = np.asarray(x, dtype=np.float32)
     x = np.clip(x, -1.0, 1.0)
-    x_i16 = np.round(x * 32767.0).astype(np.int16)
-    wavfile.write(str(path), int(sr), x_i16)
+    x_i32 = np.round(x * 2147483647.0).astype(np.int32)
+    wavfile.write(str(path), int(sr), x_i32)
 
 
 def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
