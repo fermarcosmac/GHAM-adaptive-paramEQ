@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
+import os
 from pathlib import Path
 import re
 import tempfile
@@ -8,10 +11,15 @@ from typing import Callable
 from uuid import uuid4
 
 from aquatk.metrics.PEAQ.peaq_basic import process_audio_files as peaq_process_files
+from aquatk.metrics.errors import si_sdr, mean_squared_error
+from torchaudio.functional import loudness
+from mel_cepstral_distance import compare_audio_files
+import torch
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import scipy.io.wavfile as wavfile
+from tqdm.auto import tqdm
 
 # Use LaTeX-style mathtext for figure text and numbers
 mpl.rcParams.update(
@@ -27,8 +35,10 @@ mpl.rcParams.update(
 # -----------------------------------------------------------------------------
 EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
-WINDOW_SECONDS = 20.0  # no-overlap sliding window length
+WINDOW_SECONDS = 180.0  # no-overlap sliding window length
 MAX_PLOTTED_ERRORBARS = 12
+SHOW_TQDM_PROGRESS = True
+SUPPRESS_INTERNAL_METRIC_PRINTS = True
 
 # -----------------------------------------------------------------------------
 # Metric placeholders (replace with your final implementations later)
@@ -56,6 +66,7 @@ def _write_chunk_wav(path: Path, x: np.ndarray, sr: int) -> None:
 
 
 def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -76,7 +87,7 @@ def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float
         avg_ODG = np.mean(result["ODG_list"])
         return avg_ODG
     except:
-        return float(-4.0) # Worst ODG fallback
+        return float(-4.0) # TODO Worst ODG fallback See why this is failing
     finally:
         for p in (ref_path, deg_path):
             try:
@@ -86,38 +97,50 @@ def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float
 
 
 def metric_si_sdr(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return _safe_rmse_proxy(reference, degraded)
+    return si_sdr(reference, degraded)
 
 
 def metric_mrstft_error(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     return _safe_rmse_proxy(reference, degraded)
 
 
 def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     return _safe_rmse_proxy(reference, degraded)
 
 
 def metric_spectral_centroid_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     return _safe_rmse_proxy(reference, degraded)
 
 
 def metric_spectral_bandwidth_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     return _safe_rmse_proxy(reference, degraded)
 
 
 def metric_spectral_flatness_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     return _safe_rmse_proxy(reference, degraded)
 
 
 def metric_rmse(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return _safe_rmse_proxy(reference, degraded)
+    n = min(reference.shape[0], degraded.shape[0])
+    if n == 0:
+        return np.nan
+    err = reference[:n] - degraded[:n]
+    return float(np.sqrt(np.mean(err**2) + 1e-12))
 
 
 def metric_lufs_difference(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return _safe_rmse_proxy(reference, degraded)
+    loudness_ref = loudness(torch.from_numpy(reference).view(1,-1), sample_rate=int(sf)).item()
+    loudness_deg = loudness(torch.from_numpy(degraded).view(1,-1), sample_rate=int(sf)).item()
+    return np.abs(loudness_ref - loudness_deg)
 
 
 def metric_crest_factor_difference(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     return _safe_rmse_proxy(reference, degraded)
 
 
@@ -250,10 +273,20 @@ def compute_windowed_metric(
         return np.zeros(0, dtype=np.float32)
 
     out = np.empty(n_windows, dtype=np.float32)
+
+    def _call_metric(ref_w: np.ndarray, deg_w: np.ndarray, sample_rate: float) -> float:
+        if not SUPPRESS_INTERNAL_METRIC_PRINTS:
+            return metric_fn(ref_w, deg_w, sample_rate)
+
+        # Silence internal metric prints (e.g., third-party metric functions)
+        with open(os.devnull, "w", encoding="utf-8") as devnull:
+            with redirect_stdout(devnull), redirect_stderr(devnull):
+                return metric_fn(ref_w, deg_w, sample_rate)
+
     for i in range(n_windows):
         start = i * window_len
         end = start + window_len
-        out[i] = metric_fn(reference[start:end], degraded[start:end], float(sr))
+        out[i] = _call_metric(reference[start:end], degraded[start:end], float(sr))
     return out
 
 
@@ -297,43 +330,59 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
     for s in songs:
         print(f"  - {s}")
 
+    total_metric_evals = 0
     for song in songs:
-        desired, sr_ref = load_audio_mono(parsed.desired[song])
-        noeq, sr_noeq = load_audio_mono(parsed.noeq[song])
-        if sr_ref != sr_noeq:
-            raise RuntimeError(
-                f"Sample-rate mismatch for song {song}: desired={sr_ref}, noEQ={sr_noeq}"
-            )
+        available_cond = sum(1 for cond in all_conditions if (song, cond) in parsed.eq)
+        total_metric_evals += len(METRICS) * (1 + available_cond)
 
-        for metric_name, metric_fn in METRICS.items():
-            noeq_metrics[metric_name][song] = compute_windowed_metric(
-                reference=desired,
-                degraded=noeq,
-                sr=sr_ref,
-                window_seconds=WINDOW_SECONDS,
-                metric_fn=metric_fn,
-            )
+    pbar_ctx = (
+        tqdm(total=total_metric_evals, desc="Evaluating metrics", unit="eval")
+        if SHOW_TQDM_PROGRESS
+        else nullcontext()
+    )
 
-        for cond in all_conditions:
-            eq_path = parsed.eq.get((song, cond), None)
-            if eq_path is None:
-                continue
-
-            eq_audio, sr_eq = load_audio_mono(eq_path)
-            if sr_eq != sr_ref:
+    with pbar_ctx as pbar:
+        for song in songs:
+            desired, sr_ref = load_audio_mono(parsed.desired[song])
+            noeq, sr_noeq = load_audio_mono(parsed.noeq[song])
+            if sr_ref != sr_noeq:
                 raise RuntimeError(
-                    f"Sample-rate mismatch for song {song}, condition {cond}: "
-                    f"desired={sr_ref}, EQ={sr_eq}"
+                    f"Sample-rate mismatch for song {song}: desired={sr_ref}, noEQ={sr_noeq}"
                 )
 
             for metric_name, metric_fn in METRICS.items():
-                eq_metrics[metric_name][(cond, song)] = compute_windowed_metric(
+                noeq_metrics[metric_name][song] = compute_windowed_metric(
                     reference=desired,
-                    degraded=eq_audio,
+                    degraded=noeq,
                     sr=sr_ref,
                     window_seconds=WINDOW_SECONDS,
                     metric_fn=metric_fn,
                 )
+                if pbar is not None:
+                    pbar.update(1)
+
+            for cond in all_conditions:
+                eq_path = parsed.eq.get((song, cond), None)
+                if eq_path is None:
+                    continue
+
+                eq_audio, sr_eq = load_audio_mono(eq_path)
+                if sr_eq != sr_ref:
+                    raise RuntimeError(
+                        f"Sample-rate mismatch for song {song}, condition {cond}: "
+                        f"desired={sr_ref}, EQ={sr_eq}"
+                    )
+
+                for metric_name, metric_fn in METRICS.items():
+                    eq_metrics[metric_name][(cond, song)] = compute_windowed_metric(
+                        reference=desired,
+                        degraded=eq_audio,
+                        sr=sr_ref,
+                        window_seconds=WINDOW_SECONDS,
+                        metric_fn=metric_fn,
+                    )
+                    if pbar is not None:
+                        pbar.update(1)
 
     return {
         "songs": songs,
@@ -396,6 +445,144 @@ def aggregate_for_plot(results: dict) -> dict:
         aggregate["metrics"][metric_name] = metric_payload
 
     return aggregate
+
+
+def print_metric_summary_tables(results: dict) -> None:
+    """Print one table per loss with mean/std across all evaluated windows.
+
+    Rows: (transition_time, optimizer)
+    Cols: metrics formatted as "mean +- std"
+    """
+    songs: list[str] = results["songs"]
+    conditions: list[EqCondition] = results["conditions"]
+    eq_metrics: dict[str, dict[tuple[EqCondition, str], np.ndarray]] = results["eq_metrics"]
+
+    unique_losses = sorted({c.loss for c in conditions})
+    metric_names = list(METRICS.keys())
+
+    print("\nMetric summary tables (mean +- std across all windows):")
+
+    for loss in unique_losses:
+        loss_conditions = [c for c in conditions if c.loss == loss]
+        loss_conditions = sorted(loss_conditions, key=lambda c: (c.transition_seconds, c.optimizer))
+
+        # Build rows first so we can compute column widths for readable printing.
+        rows = []
+        for cond in loss_conditions:
+            row = {
+                "Transition[s]": f"{cond.transition_seconds:.3g}",
+                "Optimizer": cond.optimizer,
+            }
+
+            for metric_name in metric_names:
+                series_list = [
+                    eq_metrics[metric_name][(cond, song)]
+                    for song in songs
+                    if (cond, song) in eq_metrics[metric_name]
+                ]
+
+                valid = [s[np.isfinite(s)] for s in series_list if s.size > 0]
+                if not valid:
+                    row[metric_name] = "n/a"
+                    continue
+
+                flat = np.concatenate(valid, axis=0)
+                if flat.size == 0:
+                    row[metric_name] = "n/a"
+                    continue
+
+                m = float(np.mean(flat))
+                s = float(np.std(flat))
+                row[metric_name] = f"{m:.4g} +- {s:.4g}"
+
+            rows.append(row)
+
+        if not rows:
+            continue
+
+        headers = ["Transition[s]", "Optimizer"] + metric_names
+        col_widths = {}
+        for h in headers:
+            col_widths[h] = max(len(h), max(len(r[h]) for r in rows))
+
+        print(f"\nLoss: {loss}")
+        header_line = " | ".join(h.ljust(col_widths[h]) for h in headers)
+        sep_line = "-+-".join("-" * col_widths[h] for h in headers)
+        print(header_line)
+        print(sep_line)
+        for r in rows:
+            print(" | ".join(r[h].ljust(col_widths[h]) for h in headers))
+
+
+def export_metric_summary_tables_csv(results: dict, export_dir: Path) -> None:
+    """Export one CSV per loss with mean/std across all evaluated windows.
+
+    Rows: (transition_time, optimizer)
+    Cols: metrics (split into <metric>_mean and <metric>_std)
+    """
+    songs: list[str] = results["songs"]
+    conditions: list[EqCondition] = results["conditions"]
+    eq_metrics: dict[str, dict[tuple[EqCondition, str], np.ndarray]] = results["eq_metrics"]
+
+    export_dir.mkdir(parents=True, exist_ok=True)
+
+    unique_losses = sorted({c.loss for c in conditions})
+    metric_names = list(METRICS.keys())
+
+    for loss in unique_losses:
+        loss_conditions = [c for c in conditions if c.loss == loss]
+        loss_conditions = sorted(loss_conditions, key=lambda c: (c.transition_seconds, c.optimizer))
+        if not loss_conditions:
+            continue
+
+        safe_loss = re.sub(r"[^A-Za-z0-9._-]+", "_", loss)
+        out_csv = export_dir / f"metric_summary_{safe_loss}.csv"
+
+        headers = ["transition_s", "transition_token", "optimizer", "loss"]
+        for metric_name in metric_names:
+            metric_slug = re.sub(r"[^A-Za-z0-9]+", "_", metric_name).strip("_").lower()
+            headers.extend([f"{metric_slug}_mean", f"{metric_slug}_std"])
+
+        with open(out_csv, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=headers)
+            writer.writeheader()
+
+            for cond in loss_conditions:
+                row = {
+                    "transition_s": f"{cond.transition_seconds:.10g}",
+                    "transition_token": cond.transition_token,
+                    "optimizer": cond.optimizer,
+                    "loss": cond.loss,
+                }
+
+                for metric_name in metric_names:
+                    metric_slug = re.sub(r"[^A-Za-z0-9]+", "_", metric_name).strip("_").lower()
+                    mean_key = f"{metric_slug}_mean"
+                    std_key = f"{metric_slug}_std"
+
+                    series_list = [
+                        eq_metrics[metric_name][(cond, song)]
+                        for song in songs
+                        if (cond, song) in eq_metrics[metric_name]
+                    ]
+                    valid = [s[np.isfinite(s)] for s in series_list if s.size > 0]
+                    if not valid:
+                        row[mean_key] = ""
+                        row[std_key] = ""
+                        continue
+
+                    flat = np.concatenate(valid, axis=0)
+                    if flat.size == 0:
+                        row[mean_key] = ""
+                        row[std_key] = ""
+                        continue
+
+                    row[mean_key] = f"{float(np.mean(flat)):.10g}"
+                    row[std_key] = f"{float(np.std(flat)):.10g}"
+
+                writer.writerow(row)
+
+        print(f"Exported CSV table: {out_csv}")
 
 
 def plot_aggregated_metrics(aggregate: dict) -> None:
@@ -524,6 +711,9 @@ def main() -> None:
 
     parsed = parse_output_directory(output_dir)
     results = compute_all_metrics(parsed, output_dir)
+    print_metric_summary_tables(results)
+    csv_export_dir = root / "results" / EXPERIMENT_NAME / "metric_summary_tables"
+    export_metric_summary_tables_csv(results, csv_export_dir)
     aggregate = aggregate_for_plot(results)
 
     print("\nSummary:")
