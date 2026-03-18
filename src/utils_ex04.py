@@ -1110,8 +1110,8 @@ def iter_param_grid(param_grid: Dict[str, Iterable[Any]]) -> Iterable[Dict[str, 
 def discover_input_signals(input_cfg: Dict[str, Any]) -> List[Tuple[str, Dict[str, Any]]]:
     """Discover which input signals should be used.
 
-    Returns a list of (mode, info) tuples where mode is one of:
-      - "white_noise": info contains {"max_audio_len_s": float}
+        Returns a list of (mode, info) tuples where mode is one of:
+            - "white_noise": info contains {"max_audio_len_s": float, "realization_idx": int, "seed_offset": int}
       - "song": info contains {"path": Path, "max_audio_len_s": float}
     """
     modes: List[Tuple[str, Dict[str, Any]]] = []
@@ -1126,7 +1126,24 @@ def discover_input_signals(input_cfg: Dict[str, Any]) -> List[Tuple[str, Dict[st
     max_audio_len_s = max_len_list[0] if max_len_list else None
 
     if use_white_noise:
-        modes.append(("white_noise", {"max_audio_len_s": max_audio_len_s}))
+        # Run multiple independent white-noise realizations, analogous to per-song runs.
+        # Reuse max_num_songs as the number of realizations (fallback to 1).
+        n_white_noise = 1
+        if max_num_songs is not None:
+            try:
+                n_white_noise = max(1, int(max_num_songs))
+            except (TypeError, ValueError):
+                n_white_noise = 1
+
+        for i in range(n_white_noise):
+            modes.append((
+                "white_noise",
+                {
+                    "max_audio_len_s": max_audio_len_s,
+                    "realization_idx": i,
+                    "seed_offset": i,
+                },
+            ))
 
     if use_songs_folder:
         songs_dir = root / "data" / "audio" / "input" / "songs"
@@ -1226,7 +1243,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     EQ = ParametricEQ(sample_rate=sr)
     #init_params_tensor = torch.rand(1,EQ.num_params)
     init_params_tensor = torch.ones(1,EQ.num_params)*0.5
-    init_params_tensor[0, [3, 6, 9, 12, 15]] = 1.0
+    init_params_tensor[0, [3, 6, 9, 12, 15]] = 2.0/3.0
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)

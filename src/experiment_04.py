@@ -33,6 +33,12 @@ def _song_stem(input_spec) -> str:
     if isinstance(input_spec, (list, tuple)) and len(input_spec) == 2:
         mode, info = input_spec
         if mode == "white_noise":
+            if isinstance(info, dict) and "realization_idx" in info:
+                try:
+                    idx = int(info["realization_idx"])
+                    return f"white_noise_{idx:03d}"
+                except (TypeError, ValueError):
+                    pass
             return "white_noise"
         if isinstance(info, dict) and "path" in info:
             return Path(info["path"]).stem
@@ -43,7 +49,7 @@ def _song_stem(input_spec) -> str:
 def main() -> None:
 
     # Load configuration
-    config_path = root / "configs" / "experiment_04_config_debug.json"
+    config_path = root / "configs" / "experiment_04_config.json"
     cfg = load_config(config_path)
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
@@ -211,15 +217,24 @@ def main() -> None:
             print("############################################")
 
             for input_spec in input_signals:
-                set_seed(seed)
+                # Keep deterministic reproducibility while allowing independent
+                # white-noise realizations per run.
+                run_seed = seed
+                mode = input_spec[0] if isinstance(input_spec, (list, tuple)) else str(input_spec)
+                info = input_spec[1] if isinstance(input_spec, (list, tuple)) and len(input_spec) == 2 else {}
+                if mode == "white_noise" and isinstance(info, dict):
+                    run_seed = seed + int(info.get("seed_offset", 0))
+                set_seed(run_seed)
                 result = run_control_experiment(sim_cfg, input_spec)
                 if result is None:
                     continue
 
                 # Derive stable identifiers
-                mode = input_spec[0] if isinstance(input_spec, (list, tuple)) else str(input_spec)
-                info = input_spec[1] if isinstance(input_spec, (list, tuple)) and len(input_spec) == 2 else {}
-                input_id = "white_noise" if mode == "white_noise" else str(info.get("path", mode))
+                if mode == "white_noise":
+                    wn_idx = info.get("realization_idx", 0) if isinstance(info, dict) else 0
+                    input_id = f"white_noise_{wn_idx}"
+                else:
+                    input_id = str(info.get("path", mode))
                 song = _song_stem(input_spec)
                 input_ids_used.add(input_id)
 
