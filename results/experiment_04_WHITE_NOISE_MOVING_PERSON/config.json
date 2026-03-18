@@ -44,7 +44,7 @@
       ]
     },
     "lambda_newton": {
-      "FD-MSE": 700.0,
+      "FD-MSE": 1000.0,
       "TD-MSE": 1.0
     },
     "loss_type": [
