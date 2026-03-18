@@ -22,20 +22,29 @@
     ],
     "optim_type": [
       "GHAM-1",
-      "Adam"
+      "SGD",
+      "Adam",
+      "GHAM-3",
+      "Newton"
     ],
     "mu_opt": {
       "FD-MSE": [
-        0.005,
-        0.01
+        0.001,
+        0.001,
+        0.001,
+        0.001,
+        1.0
       ],
       "TD-MSE": [
         0.0005,
-        0.002
+        0.005,
+        0.002,
+        0.0005,
+        1.0
       ]
     },
     "lambda_newton": {
-      "FD-MSE": 1000.0,
+      "FD-MSE": 700.0,
       "TD-MSE": 1.0
     },
     "loss_type": [
@@ -55,6 +64,8 @@
       4
     ],
     "transition_time_s": [
+      1.0,
+      15.0,
       30.0
     ],
     "use_true_LEM": [
