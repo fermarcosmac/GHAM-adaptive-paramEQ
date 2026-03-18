@@ -12,6 +12,12 @@ mpl.rcParams.update(
         "font.family": "serif",
         "mathtext.fontset": "cm",
         "axes.formatter.use_mathtext": True,
+        "axes.titlesize": 12,
+        "axes.labelsize": 13,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
+        "legend.fontsize": 11,
+        "figure.titlesize": 13,
     }
 )
 
@@ -32,6 +38,176 @@ def load_results(experiment_name: str, root: Path) -> tuple[dict, dict]:
         plot1_data = pickle.load(f)
 
     return cfg, plot1_data
+
+
+def _latex_escape(text: str) -> str:
+    return text.replace("_", r"\_").replace(" ", r"\ ")
+
+
+def _plot_mean_std(ax, series, color, linestyle, label):
+    """Plot mean +- std from list of (time_axis, values)."""
+    if not series:
+        return
+    min_len = min(len(v[1]) for v in series)
+    all_vals, common_time = [], None
+    for time_axis, vals in series:
+        if not np.isnan(vals).any():
+            all_vals.append(vals[:min_len])
+        if common_time is None:
+            common_time = time_axis[:min_len]
+    if not all_vals or common_time is None:
+        return
+    vals_stack = np.stack(all_vals, axis=0)
+    avg = np.mean(vals_stack, axis=0)
+    std = np.std(vals_stack, axis=0)
+    ax.plot(common_time, avg, color=color, linestyle=linestyle,
+            linewidth=1.0, alpha=0.95, label=label)
+    num_m = min(10, len(common_time))
+    idxs = np.linspace(0, len(common_time) - 1, num=num_m, dtype=int)
+    ax.errorbar(common_time[idxs], avg[idxs], yerr=std[idxs],
+                fmt="none", ecolor=color, elinewidth=1.0, capsize=3, alpha=0.7)
+
+
+def _plot_dual_scenario_validation(root: Path) -> None:
+    scenario_to_experiment = {
+        "Moving listener position (all songs)": "experiment_04_ALL_SONGS_MOVING_POSITION",
+        "Moving person (all songs)": "experiment_04_ALL_SONGS_MOVING_PERSON",
+        "Moving listener position (white noise)": "experiment_04_WHITE_NOISE_MOVING_POSITION",
+        "Moving person (white noise)": "experiment_04_WHITE_NOISE_MOVING_PERSON",
+    }
+
+    loaded = {}
+    for scenario_name, experiment_name in scenario_to_experiment.items():
+        try:
+            _, plot_data = load_results(experiment_name, root)
+            loaded[scenario_name] = plot_data
+        except FileNotFoundError as exc:
+            print(f"Skipping dual-scenario plot: {exc}")
+            return
+
+    all_tt = sorted(
+        {
+            key[0]
+            for plot_data in loaded.values()
+            for key in plot_data.get("curves", {}).keys()
+        }
+    )
+    if not all_tt:
+        print("Skipping dual-scenario plot: no validation curves available.")
+        return
+
+    # Build unified optimizer/loss spaces for consistent colors/styles.
+    all_optim = sorted(
+        {
+            key[1]
+            for plot_data in loaded.values()
+            for key in plot_data.get("curves", {}).keys()
+        }
+    )
+    all_loss = sorted(
+        {
+            key[2]
+            for plot_data in loaded.values()
+            for key in plot_data.get("curves", {}).keys()
+        }
+    )
+
+    color_map = plt.get_cmap("tab10")
+    optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(all_optim)}
+    lt_linestyle = {lt: ls for lt, ls in zip(all_loss, ["-", "--", "-.", ":"])}
+
+    n_rows = len(all_tt)
+    n_cols = len(scenario_to_experiment)
+
+    # Dedicated left label column for transition-time annotations.
+    fig = plt.figure(figsize=(2.5 * n_cols + 1.5, 1.5 * n_rows + 0.8))
+    gs = fig.add_gridspec(
+        n_rows, n_cols + 1,
+            width_ratios=[0.22] + [1.0] * n_cols,
+    )
+    label_axes = [fig.add_subplot(gs[r, 0]) for r in range(n_rows)]
+    for ax_label in label_axes:
+        ax_label.set_axis_off()
+    axes = np.array([[fig.add_subplot(gs[r, c + 1]) for c in range(n_cols)]
+                     for r in range(n_rows)])
+
+    scenario_items = list(scenario_to_experiment.items())
+    for row_i, tt in enumerate(all_tt):
+        for col_i, (scenario_name, _) in enumerate(scenario_items):
+            ax = axes[row_i, col_i]
+            plot_data = loaded[scenario_name]
+            curves = plot_data.get("curves", {})
+            tt_transitions = plot_data.get("tt_transitions", {})
+
+            if row_i == 0:
+                ax.set_title(r"$\mathrm{" + _latex_escape(scenario_name) + r"}$")
+
+            ax.axhline(y=1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
+
+            trans = tt_transitions.get(tt, None)
+            if trans is not None:
+                for t_start, t_end in trans:
+                    ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                    if t_start != t_end:
+                        ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                        ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
+
+            for lt in all_loss:
+                for optim in all_optim:
+                    key = (tt, optim, lt)
+                    if key not in curves or not curves[key]:
+                        continue
+
+                    legend_label = r"$\mathrm{" + _latex_escape(optim.replace("_", " ")) + r"}$"
+                    _plot_mean_std(
+                        ax,
+                        curves[key],
+                        color=optim_to_color[optim],
+                        linestyle=lt_linestyle.get(lt, "-"),
+                        label=legend_label,
+                    )
+
+            ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
+            ax.set_ylim(-0.2, 1.5)
+            ax.set_yticks([0, 1])
+            ax.set_yticklabels(["0", "1"])
+            if row_i == n_rows - 1:
+                ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
+
+        label_axes[row_i].text(
+            0.5, 0.5,
+            f"Transition\ntime: {tt} s",
+            transform=label_axes[row_i].transAxes,
+            ha="center",
+            va="center",
+            fontsize=9,
+        )
+
+    handles, labels = axes[0, -1].get_legend_handles_labels()
+    if handles:
+        # De-duplicate labels while preserving order.
+        unique_h, unique_l = [], []
+        for h, l in zip(handles, labels):
+            if l in unique_l:
+                continue
+            unique_h.append(h)
+            unique_l.append(l)
+        axes[0, -1].legend(
+            unique_h,
+            unique_l,
+            loc="upper right",
+            fontsize=7,
+            frameon=True,
+            borderpad=0.2,
+            labelspacing=0.2,
+            handlelength=1.2,
+            handletextpad=0.3,
+            columnspacing=0.6,
+            borderaxespad=0.2,
+        )
+
+    #fig.suptitle(r"$\mathrm{Validation\ Error\ Comparison:\ Moving\ Position\ vs\ Moving\ Person}$")
+    plt.tight_layout()
 
 
 def plot_results(cfg: dict, plot1_data: dict) -> None:
@@ -266,7 +442,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
         fig2, axes2 = plt.subplots(
             n_cp_rows, n_cp_cols,
-            figsize=(2 * n_cp_cols, 2.5 * n_cp_rows), # adjust checkpoint figure size
+            figsize=(1.8 * n_cp_cols, 2.4 * n_cp_rows), # adjust checkpoint figure size
             sharex=True, sharey=True, squeeze=False,
         )
 
@@ -316,24 +492,24 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                         ax.plot(freqs_log_o, np.asarray(H_total_opt, dtype=float),
                                 color=eq_colors.get(opt, "gray"),
                                 linewidth=1.0, alpha=0.55,
-                                label=opt.replace("_", " "), zorder=3)
+                                label="_nolegend_", zorder=3)
 
                 ax.set_xscale("log")
                 ax.set_ylim(-20, 20)
                 ax.grid(True, which="both", linestyle=":", linewidth=0.5, alpha=0.6)
-                if row_i == n_cp_rows - 1:
-                    ax.set_xlabel("Frequency [Hz]")
                 if col_i == 0:
-                    ax.set_ylabel(f"{lt}\nMagnitude [dB]")
+                    ax.set_ylabel("Magnitude [dB]", fontsize=10)
 
         # Single legend in top-left cell
         handles2, labels2 = axes2[0, 0].get_legend_handles_labels()
         if handles2:
             axes2[0, 0].legend(handles2, labels2, loc="best", fontsize=7)
 
-        plt.tight_layout()
-
-    plt.show()
+        # Use manual figure text so x-label position is independent and tightly controlled.
+        fig2.tight_layout()
+        bottom_axes_y = min(ax.get_position().y0 for ax in axes2[-1, :])
+        x_label_y = max(0.005, bottom_axes_y - 0.12)
+        fig2.text(0.5, x_label_y, "Frequency [Hz]", ha="center", va="top", fontsize=10)
 
 
 def main() -> None:
@@ -346,6 +522,16 @@ def main() -> None:
     cfg, plot1_data = load_results(experiment_name, root)
     print(f"Experiment name: {experiment_name}")
     plot_results(cfg, plot1_data)
+
+    if experiment_name in {
+        "experiment_04_ALL_SONGS_MOVING_POSITION",
+        "experiment_04_ALL_SONGS_MOVING_PERSON",
+        "experiment_04_WHITE_NOISE_MOVING_POSITION",
+        "experiment_04_WHITE_NOISE_MOVING_PERSON",
+    }:
+        _plot_dual_scenario_validation(root)
+    
+    plt.show()
 
 
 if __name__ == "__main__":
