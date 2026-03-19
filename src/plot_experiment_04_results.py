@@ -171,6 +171,24 @@ def _plot_dual_scenario_validation(root: Path) -> None:
             ax.set_ylim(-0.2, 1.5)
             ax.set_yticks([0, 1])
             ax.set_yticklabels(["0", "1"])
+            is_left_col = (col_i == 0)
+            is_bottom_row = (row_i == n_rows - 1)
+            ax.tick_params(
+                axis="x",
+                which="both",
+                bottom=is_bottom_row,
+                labelbottom=is_bottom_row,
+                top=False,
+                labeltop=False,
+            )
+            ax.tick_params(
+                axis="y",
+                which="both",
+                left=is_left_col,
+                labelleft=is_left_col,
+                right=False,
+                labelright=False,
+            )
             if row_i == n_rows - 1:
                 ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
 
@@ -207,7 +225,7 @@ def _plot_dual_scenario_validation(root: Path) -> None:
         )
 
     #fig.suptitle(r"$\mathrm{Validation\ Error\ Comparison:\ Moving\ Position\ vs\ Moving\ Person}$")
-    plt.tight_layout()
+    fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
 
 
 def plot_results(cfg: dict, plot1_data: dict) -> None:
@@ -514,7 +532,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_ALL_SONGS_MOVING_PERSON"
+    experiment_name = "experiment_04_WHITE_NOISE_MOVING_POSITION"
 
     # Project root (same convention as experiment_04.py)
     root = Path(__file__).resolve().parents[1]
