@@ -1,6 +1,6 @@
 {
   "experiment_name": "experiment_04_DEBUG",
-  "scenario": "moving_position",
+  "scenario": "moving_person",
   "simulation_params": {
     "ROI": [
       [
@@ -21,16 +21,13 @@
       0.05
     ],
     "optim_type": [
-      "SGD",
-      "Adam"
+      "SGD"
     ],
     "mu_opt": {
       "FD-MSE": [
-        0.005,
         0.005
       ],
       "TD-MSE": [
-        0.0005,
         0.0005
       ]
     },
@@ -55,6 +52,7 @@
       4
     ],
     "transition_time_s": [
+      1.0,
       30.0
     ],
     "use_true_LEM": [
@@ -65,8 +63,8 @@
     ]
   },
   "input": {
-    "use_white_noise": true,
-    "use_songs_folder": false,
+    "use_white_noise": false,
+    "use_songs_folder": true,
     "max_num_songs": 12,
     "max_audio_len_s": [
       180.0

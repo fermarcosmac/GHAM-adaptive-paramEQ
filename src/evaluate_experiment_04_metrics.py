@@ -13,7 +13,11 @@ from uuid import uuid4
 from aquatk.metrics.PEAQ.peaq_basic import process_audio_files as peaq_process_files
 from aquatk.metrics.errors import si_sdr, mean_squared_error
 from torchaudio.functional import loudness
-from mel_cepstral_distance import compare_audio_files
+from mel_cepstral_distance import compare_audio_files as melcd_compare_files
+try:
+    from librosa.feature import spectral_centroid
+except ModuleNotFoundError:
+    spectral_centroid = None
 import torch
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -55,6 +59,7 @@ def _safe_rmse_proxy(reference: np.ndarray, degraded: np.ndarray) -> float:
 
 
 _PEAQ_TMP_DIR = Path(tempfile.mkdtemp(prefix="peaq_windows_"))
+_MCD_TMP_DIR = Path(tempfile.mkdtemp(prefix="mcd_windows_"))
 
 
 def _write_chunk_wav(path: Path, x: np.ndarray, sr: int) -> None:
@@ -106,13 +111,63 @@ def metric_mrstft_error(reference: np.ndarray, degraded: np.ndarray, sf: float) 
 
 
 def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
-    return _safe_rmse_proxy(reference, degraded)
+    #return 0.0
+    n = min(reference.shape[0], degraded.shape[0])
+    if n == 0:
+        return np.nan
+
+    ref_chunk = reference[:n]
+    deg_chunk = degraded[:n]
+    sr = int(round(float(sf)))
+
+    uid = uuid4().hex
+    ref_path = _MCD_TMP_DIR / f"ref_{uid}.wav"
+    deg_path = _MCD_TMP_DIR / f"deg_{uid}.wav"
+
+    _write_chunk_wav(ref_path, ref_chunk, sr)
+    _write_chunk_wav(deg_path, deg_chunk, sr)
+
+    try:
+        # Use pad alignment for significantly faster runtime during large evaluations.
+        result, _ = melcd_compare_files(
+            str(ref_path),
+            str(deg_path),
+            sample_rate=16000,
+            n_fft=32,
+            win_len=32,
+            hop_len=8,
+            aligning="pad",
+        )
+        return float(result)
+    except:
+        return float('inf') # TODO Worst MCD fallback
+    finally:
+        for p in (ref_path, deg_path):
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def metric_spectral_centroid_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
-    return _safe_rmse_proxy(reference, degraded)
+    if spectral_centroid is None:
+        raise ImportError(
+            "librosa is required for spectral centroid metric. "
+            "Activate the AudioEval environment before running this script."
+        )
+    sc_ref = spectral_centroid(
+        y=reference,
+        sr=int(round(float(sf))),
+        n_fft=2048,
+        hop_length=512,
+    )
+    sc_deg = spectral_centroid(
+        y=degraded,
+        sr=int(round(float(sf))),
+        n_fft=2048,
+        hop_length=512,
+    )
+    return float(np.mean(np.abs(sc_ref - sc_deg)))
 
 
 def metric_spectral_bandwidth_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
@@ -150,8 +205,6 @@ METRICS: dict[str, Callable[[np.ndarray, np.ndarray, float], float]] = {
     "MR-STFT Error": metric_mrstft_error,
     "Mel Spectral Distance": metric_mel_spectral_distance,
     "Spectral Centroid Delta": metric_spectral_centroid_delta,
-    "Spectral Bandwidth Delta": metric_spectral_bandwidth_delta,
-    "Spectral Flatness Delta": metric_spectral_flatness_delta,
     "RMSE": metric_rmse,
     "LUFS Difference": metric_lufs_difference,
     "Crest Factor Difference": metric_crest_factor_difference,
@@ -324,6 +377,28 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
     if not all_conditions:
         raise RuntimeError(f"No EQ files found in: {output_dir}")
 
+    # Add synthetic noEQ conditions as optimizer="None" for each (loss, transition).
+    none_conditions: list[EqCondition] = []
+    seen_loss_tt: set[tuple[str, str]] = set()
+    for cond in all_conditions:
+        key = (cond.loss, cond.transition_token)
+        if key in seen_loss_tt:
+            continue
+        seen_loss_tt.add(key)
+        none_conditions.append(
+            EqCondition(
+                optimizer="None",
+                loss=cond.loss,
+                transition_token=cond.transition_token,
+                transition_seconds=cond.transition_seconds,
+            )
+        )
+
+    all_conditions = sorted(
+        all_conditions + none_conditions,
+        key=lambda c: (c.transition_seconds, c.loss, c.optimizer),
+    )
+
     print(f"Mode: {MODE}")
     print(f"Experiment output directory: {output_dir}")
     print(f"Songs selected: {len(songs)}")
@@ -332,7 +407,11 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
 
     total_metric_evals = 0
     for song in songs:
-        available_cond = sum(1 for cond in all_conditions if (song, cond) in parsed.eq)
+        available_cond = sum(
+            1
+            for cond in all_conditions
+            if cond.optimizer == "None" or (song, cond) in parsed.eq
+        )
         total_metric_evals += len(METRICS) * (1 + available_cond)
 
     pbar_ctx = (
@@ -362,6 +441,13 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
                     pbar.update(1)
 
             for cond in all_conditions:
+                if cond.optimizer == "None":
+                    for metric_name in METRICS:
+                        eq_metrics[metric_name][(cond, song)] = noeq_metrics[metric_name][song]
+                        if pbar is not None:
+                            pbar.update(1)
+                    continue
+
                 eq_path = parsed.eq.get((song, cond), None)
                 if eq_path is None:
                     continue
