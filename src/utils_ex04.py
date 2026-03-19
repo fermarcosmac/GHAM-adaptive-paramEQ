@@ -1185,8 +1185,6 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     print(f"Mode: {mode}")
     print(f"Input info: {info}")
 
-    # TODO: plug in experiment_03 logic here
-
     # Load config variables
     input_type = input_spec[0]
     max_audio_len_s = input_spec[1]["max_audio_len_s"]

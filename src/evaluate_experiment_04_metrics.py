@@ -14,6 +14,7 @@ from aquatk.metrics.PEAQ.peaq_basic import process_audio_files as peaq_process_f
 from aquatk.metrics.errors import si_sdr, mean_squared_error
 from torchaudio.functional import loudness
 from mel_cepstral_distance import compare_audio_files as melcd_compare_files
+import auraloss
 try:
     from librosa.feature import spectral_centroid
 except ModuleNotFoundError:
@@ -39,7 +40,8 @@ mpl.rcParams.update(
 # -----------------------------------------------------------------------------
 EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
-WINDOW_SECONDS = 180.0  # no-overlap sliding window length
+WINDOW_SECONDS = 10.0  # no-overlap sliding window length
+REFERENCE_DELAY_SAMPLES = 600  # delay applied to reference before metric windowing
 MAX_PLOTTED_ERRORBARS = 12
 SHOW_TQDM_PROGRESS = True
 SUPPRESS_INTERNAL_METRIC_PRINTS = True
@@ -68,6 +70,18 @@ def _write_chunk_wav(path: Path, x: np.ndarray, sr: int) -> None:
     x = np.clip(x, -1.0, 1.0)
     x_i32 = np.round(x * 2147483647.0).astype(np.int32)
     wavfile.write(str(path), int(sr), x_i32)
+
+
+def apply_sample_delay(x: np.ndarray, delay_samples: int) -> np.ndarray:
+    """Delay signal by inserting leading zeros and truncating to original length."""
+    x = np.asarray(x)
+    d = int(delay_samples)
+    if d <= 0:
+        return x
+    y = np.zeros_like(x)
+    if d < x.shape[0]:
+        y[d:] = x[:-d]
+    return y
 
 
 def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
@@ -102,16 +116,18 @@ def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float
 
 
 def metric_si_sdr(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    # Optional debug line for quick visual inspection when this metric is hit:
+    # save_metric_temp_plot(reference, degraded, sf)
+    #return 0.0
     return si_sdr(reference, degraded)
 
 
 def metric_mrstft_error(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
-    return _safe_rmse_proxy(reference, degraded)
+    mrstft = auraloss.freq.MultiResolutionSTFTLoss()
+    return mrstft(torch.from_numpy(reference).float().view(1,1,-1), torch.from_numpy(degraded).float().view(1,1,-1)).numpy()
 
 
 def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    #return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -150,6 +166,7 @@ def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf
 
 
 def metric_spectral_centroid_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     if spectral_centroid is None:
         raise ImportError(
             "librosa is required for spectral centroid metric. "
@@ -181,6 +198,7 @@ def metric_spectral_flatness_delta(reference: np.ndarray, degraded: np.ndarray, 
 
 
 def metric_rmse(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -189,6 +207,7 @@ def metric_rmse(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float
 
 
 def metric_lufs_difference(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     loudness_ref = loudness(torch.from_numpy(reference).view(1,-1), sample_rate=int(sf)).item()
     loudness_deg = loudness(torch.from_numpy(degraded).view(1,-1), sample_rate=int(sf)).item()
     return np.abs(loudness_ref - loudness_deg)
@@ -377,7 +396,7 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
     if not all_conditions:
         raise RuntimeError(f"No EQ files found in: {output_dir}")
 
-    # Add synthetic noEQ conditions as optimizer="None" for each (loss, transition).
+    # Add synthetic noEQ conditions as optimizer="No EQ" for each (loss, transition).
     none_conditions: list[EqCondition] = []
     seen_loss_tt: set[tuple[str, str]] = set()
     for cond in all_conditions:
@@ -387,7 +406,7 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
         seen_loss_tt.add(key)
         none_conditions.append(
             EqCondition(
-                optimizer="None",
+                optimizer="No EQ",
                 loss=cond.loss,
                 transition_token=cond.transition_token,
                 transition_seconds=cond.transition_seconds,
@@ -410,7 +429,7 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
         available_cond = sum(
             1
             for cond in all_conditions
-            if cond.optimizer == "None" or (song, cond) in parsed.eq
+            if cond.optimizer == "No EQ" or (song, cond) in parsed.eq
         )
         total_metric_evals += len(METRICS) * (1 + available_cond)
 
@@ -429,9 +448,11 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
                     f"Sample-rate mismatch for song {song}: desired={sr_ref}, noEQ={sr_noeq}"
                 )
 
+            desired_delayed = apply_sample_delay(desired, REFERENCE_DELAY_SAMPLES)
+
             for metric_name, metric_fn in METRICS.items():
                 noeq_metrics[metric_name][song] = compute_windowed_metric(
-                    reference=desired,
+                    reference=desired_delayed,
                     degraded=noeq,
                     sr=sr_ref,
                     window_seconds=WINDOW_SECONDS,
@@ -441,7 +462,7 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
                     pbar.update(1)
 
             for cond in all_conditions:
-                if cond.optimizer == "None":
+                if cond.optimizer == "No EQ":
                     for metric_name in METRICS:
                         eq_metrics[metric_name][(cond, song)] = noeq_metrics[metric_name][song]
                         if pbar is not None:
@@ -461,7 +482,7 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
 
                 for metric_name, metric_fn in METRICS.items():
                     eq_metrics[metric_name][(cond, song)] = compute_windowed_metric(
-                        reference=desired,
+                        reference=desired_delayed,
                         degraded=eq_audio,
                         sr=sr_ref,
                         window_seconds=WINDOW_SECONDS,
@@ -514,7 +535,18 @@ def aggregate_for_plot(results: dict) -> dict:
             }
 
         for cond in conditions:
-            series = [eq_metrics[metric_name][(cond, song)] for song in songs if (cond, song) in eq_metrics[metric_name]]
+            if cond.optimizer == "No EQ":
+                series = [
+                    noeq_metrics[metric_name][song]
+                    for song in songs
+                    if song in noeq_metrics[metric_name]
+                ]
+            else:
+                series = [
+                    eq_metrics[metric_name][(cond, song)]
+                    for song in songs
+                    if (cond, song) in eq_metrics[metric_name]
+                ]
             stack = align_and_stack(series)
             if stack.size == 0:
                 continue
@@ -541,6 +573,7 @@ def print_metric_summary_tables(results: dict) -> None:
     """
     songs: list[str] = results["songs"]
     conditions: list[EqCondition] = results["conditions"]
+    noeq_metrics: dict[str, dict[str, np.ndarray]] = results["noeq_metrics"]
     eq_metrics: dict[str, dict[tuple[EqCondition, str], np.ndarray]] = results["eq_metrics"]
 
     unique_losses = sorted({c.loss for c in conditions})
@@ -561,11 +594,18 @@ def print_metric_summary_tables(results: dict) -> None:
             }
 
             for metric_name in metric_names:
-                series_list = [
-                    eq_metrics[metric_name][(cond, song)]
-                    for song in songs
-                    if (cond, song) in eq_metrics[metric_name]
-                ]
+                if cond.optimizer == "No EQ":
+                    series_list = [
+                        noeq_metrics[metric_name][song]
+                        for song in songs
+                        if song in noeq_metrics[metric_name]
+                    ]
+                else:
+                    series_list = [
+                        eq_metrics[metric_name][(cond, song)]
+                        for song in songs
+                        if (cond, song) in eq_metrics[metric_name]
+                    ]
 
                 valid = [s[np.isfinite(s)] for s in series_list if s.size > 0]
                 if not valid:
@@ -608,6 +648,7 @@ def export_metric_summary_tables_csv(results: dict, export_dir: Path) -> None:
     """
     songs: list[str] = results["songs"]
     conditions: list[EqCondition] = results["conditions"]
+    noeq_metrics: dict[str, dict[str, np.ndarray]] = results["noeq_metrics"]
     eq_metrics: dict[str, dict[tuple[EqCondition, str], np.ndarray]] = results["eq_metrics"]
 
     export_dir.mkdir(parents=True, exist_ok=True)
@@ -646,11 +687,18 @@ def export_metric_summary_tables_csv(results: dict, export_dir: Path) -> None:
                     mean_key = f"{metric_slug}_mean"
                     std_key = f"{metric_slug}_std"
 
-                    series_list = [
-                        eq_metrics[metric_name][(cond, song)]
-                        for song in songs
-                        if (cond, song) in eq_metrics[metric_name]
-                    ]
+                    if cond.optimizer == "No EQ":
+                        series_list = [
+                            noeq_metrics[metric_name][song]
+                            for song in songs
+                            if song in noeq_metrics[metric_name]
+                        ]
+                    else:
+                        series_list = [
+                            eq_metrics[metric_name][(cond, song)]
+                            for song in songs
+                            if (cond, song) in eq_metrics[metric_name]
+                        ]
                     valid = [s[np.isfinite(s)] for s in series_list if s.size > 0]
                     if not valid:
                         row[mean_key] = ""
@@ -728,6 +776,9 @@ def plot_aggregated_metrics(aggregate: dict) -> None:
 
                 plotted_any = False
                 for optimizer in optimizers:
+                    if optimizer in ("No EQ", "None"):
+                        continue
+
                     condition_match = [
                         cond
                         for cond in payload["eq"].keys()

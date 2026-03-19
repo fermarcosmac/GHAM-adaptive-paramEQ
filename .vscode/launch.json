@@ -11,7 +11,7 @@
             "program": "${file}",
             "python": "C:\\Users\\ferma\\.conda\\envs\\AudioEval\\python.exe",
             "console": "integratedTerminal",
-            "justMyCode": true,
+            "justMyCode": false,
             "env": {
                 "PYDEVD_WARN_EVALUATION_TIMEOUT": "60",
                 "PYDEVD_UNBLOCK_THREADS_TIMEOUT": "10",
