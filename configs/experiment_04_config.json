@@ -1,5 +1,5 @@
 {
-  "experiment_name": "experiment_04_WHITE_NOISE_MOVING_PERSON",
+  "experiment_name": "experiment_04_ALL_SONGS_MOVING_PERSON",
   "scenario": "moving_person",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
