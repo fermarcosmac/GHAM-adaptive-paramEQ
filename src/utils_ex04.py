@@ -1241,7 +1241,7 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
     EQ = ParametricEQ(sample_rate=sr)
     #init_params_tensor = torch.rand(1,EQ.num_params)
     init_params_tensor = torch.ones(1,EQ.num_params)*0.5
-    init_params_tensor[0, [3, 6, 9, 12, 15]] = 2.0/3.0
+    init_params_tensor[0, [3, 6, 9, 12, 15]] = 1.0
     #dasp_param_dict = { k: torch.as_tensor(v, dtype=torch.float32).view(1) for k, v in EQ_comp_dict["eq_params"].items() }
     #_, init_params_tensor = EQ.clip_normalize_param_dict(dasp_param_dict) # initial normalized parameter vector
     EQ_memory = 128 # TODO: hardcoded for now (should be greater than 0)

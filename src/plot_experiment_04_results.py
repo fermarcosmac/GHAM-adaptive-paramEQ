@@ -44,8 +44,80 @@ def _latex_escape(text: str) -> str:
     return text.replace("_", r"\_").replace(" ", r"\ ")
 
 
-def _plot_mean_std(ax, series, color, linestyle, label):
+def _format_input_label(input_signal) -> str:
+    """Map an input-signal identifier to a compact, readable label."""
+    s = str(input_signal)
+    if s.startswith("white_noise"):
+        return s
+    p = Path(s)
+    if p.suffix:
+        return p.stem
+    return s
+
+
+def _select_series_for_averaging(
+    series,
+    n_remove_highest_mean_curves: int = 0,
+    run_labels=None,
+    report_context: str = None,
+):
+    """Optionally remove n runs with the highest time-mean value."""
+    if not series:
+        return series
+
+    n_remove = max(0, int(n_remove_highest_mean_curves))
+    if n_remove == 0:
+        return series
+
+    min_len = min(len(v[1]) for v in series)
+    if min_len == 0 or len(series) <= 1:
+        return series
+
+    # Keep at least one run to avoid empty aggregation.
+    n_remove = min(n_remove, len(series) - 1)
+    if n_remove == 0:
+        return series
+
+    mean_per_run = []
+    for _, vals in series:
+        run_vals = np.asarray(vals[:min_len], dtype=float)
+        mean_per_run.append(np.nanmean(run_vals))
+
+    means = np.asarray(mean_per_run, dtype=float)
+    idx_sorted_desc = np.argsort(-means)
+    idx_remove_list = [int(i) for i in idx_sorted_desc[:n_remove]]
+    idx_remove = set(idx_remove_list)
+
+    if report_context:
+        removed_labels = []
+        for i in idx_remove_list:
+            if run_labels is not None and i < len(run_labels):
+                removed_labels.append(str(run_labels[i]))
+            else:
+                removed_labels.append(f"run_{i}")
+        if removed_labels:
+            print(f"[curve-filter] {report_context} -> removed: {', '.join(removed_labels)}")
+
+    return [s for i, s in enumerate(series) if i not in idx_remove]
+
+
+def _plot_mean_std(
+    ax,
+    series,
+    color,
+    linestyle,
+    label,
+    n_remove_highest_mean_curves: int = 0,
+    run_labels=None,
+    report_context: str = None,
+):
     """Plot mean +- std from list of (time_axis, values)."""
+    series = _select_series_for_averaging(
+        series,
+        n_remove_highest_mean_curves,
+        run_labels=run_labels,
+        report_context=report_context,
+    )
     if not series:
         return
     min_len = min(len(v[1]) for v in series)
@@ -68,7 +140,7 @@ def _plot_mean_std(ax, series, color, linestyle, label):
                 fmt="none", ecolor=color, elinewidth=1.0, capsize=3, alpha=0.7)
 
 
-def _plot_dual_scenario_validation(root: Path) -> None:
+def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int = 0) -> None:
     scenario_to_experiment = {
         "Moving listener position (all songs)": "experiment_04_ALL_SONGS_MOVING_POSITION",
         "Moving person (all songs)": "experiment_04_ALL_SONGS_MOVING_PERSON",
@@ -138,6 +210,10 @@ def _plot_dual_scenario_validation(root: Path) -> None:
             plot_data = loaded[scenario_name]
             curves = plot_data.get("curves", {})
             tt_transitions = plot_data.get("tt_transitions", {})
+            scenario_input_signals = plot_data.get("input_signals", None)
+            run_labels = [
+                _format_input_label(sig) for sig in scenario_input_signals
+            ] if scenario_input_signals else None
 
             if row_i == 0:
                 ax.set_title(r"$\mathrm{" + _latex_escape(scenario_name) + r"}$")
@@ -165,6 +241,9 @@ def _plot_dual_scenario_validation(root: Path) -> None:
                         color=optim_to_color[optim],
                         linestyle=lt_linestyle.get(lt, "-"),
                         label=legend_label,
+                        n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+                        run_labels=run_labels,
+                        report_context=f"{scenario_name} | tt={tt}, optim={optim}, loss={lt}",
                     )
 
             ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
@@ -228,7 +307,7 @@ def _plot_dual_scenario_validation(root: Path) -> None:
     fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
 
 
-def plot_results(cfg: dict, plot1_data: dict) -> None:
+def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int = 0) -> None:
     curves = plot1_data["curves"]
     loss_curves = plot1_data.get("loss_curves", {})
     compute_time_stats = plot1_data.get("compute_time_stats", {})
@@ -246,6 +325,7 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
     unique_tt   = sorted({k[0] for k in all_curve_keys})
     optim_types = sorted({k[1] for k in all_curve_keys})
     unique_loss_types = sorted({k[2] for k in all_curve_keys})
+    run_labels = [_format_input_label(sig) for sig in input_signals] if input_signals else None
 
     # Pretty-print configuration
     print("Loaded configuration:\n")
@@ -343,8 +423,16 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
     axes = np.array([[fig.add_subplot(gs[r, c + 1]) for c in range(n_cols)]
                      for r in range(n_rows)])
 
-    def _plot_curve_series(ax, series, color, linestyle, label):
+    def _plot_curve_series(ax, series, color, linestyle, label, report_context: str = None):
         """Plot mean ± std of a list of (time_axis, values) pairs."""
+        series = _select_series_for_averaging(
+            series,
+            n_remove_highest_mean_curves,
+            run_labels=run_labels,
+            report_context=report_context,
+        )
+        if not series:
+            return
         min_len = min(len(v[1]) for v in series)
         all_vals, common_time = [], None
         for time_axis, vals in series:
@@ -397,13 +485,20 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
                 loss_key = (tt, optim, lt)
 
                 if val_key in curves and curves[val_key]:
-                    _plot_curve_series(ax_val, curves[val_key], color, "-", label)
+                    _plot_curve_series(
+                        ax_val,
+                        curves[val_key],
+                        color,
+                        "-",
+                        label,
+                        report_context=f"tt={tt}, optim={optim}, loss={lt}",
+                    )
 
                 if loss_key in loss_curves and loss_curves[loss_key]:
                     series = loss_curves[loss_key]
                     # clip for log scale
                     clipped = [(ta, np.clip(v, 1e-8, None)) for ta, v in series]
-                    _plot_curve_series(ax_loss, clipped, color, "-", label)
+                    _plot_curve_series(ax_loss, clipped, color, "-", label, report_context=None)
 
                 # Set y-limits based on loss type
                 if lt == 'FD-MSE':
@@ -533,13 +628,14 @@ def plot_results(cfg: dict, plot1_data: dict) -> None:
 def main() -> None:
     # Select the experiment to plot here
     experiment_name = "experiment_04_ALL_SONGS_MOVING_POSITION"
+    n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
 
     # Project root (same convention as experiment_04.py)
     root = Path(__file__).resolve().parents[1]
 
     cfg, plot1_data = load_results(experiment_name, root)
     print(f"Experiment name: {experiment_name}")
-    plot_results(cfg, plot1_data)
+    plot_results(cfg, plot1_data, n_remove_highest_mean_curves=n_remove_highest_mean_curves)
 
     if experiment_name in {
         "experiment_04_ALL_SONGS_MOVING_POSITION",
@@ -547,7 +643,7 @@ def main() -> None:
         "experiment_04_WHITE_NOISE_MOVING_POSITION",
         "experiment_04_WHITE_NOISE_MOVING_PERSON",
     }:
-        _plot_dual_scenario_validation(root)
+        _plot_dual_scenario_validation(root, n_remove_highest_mean_curves=n_remove_highest_mean_curves)
     
     plt.show()
 
