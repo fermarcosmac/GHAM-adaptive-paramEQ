@@ -15,7 +15,11 @@ from torch.func import jacrev, jacfwd
 from torch.linalg import lstsq
 from modules_ex04 import LEMConv, Ridge
 from lib.local_dasp_pytorch.modules import ParametricEQ, Gain
-from experiment_03 import frame_analysis_plot
+try:
+    from experiment_03 import frame_analysis_plot
+except Exception:
+    def frame_analysis_plot(*args, **kwargs):
+        return None
 from utils import (
     load_audio,
     load_rirs,
