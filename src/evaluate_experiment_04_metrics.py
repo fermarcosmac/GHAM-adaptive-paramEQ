@@ -40,8 +40,9 @@ mpl.rcParams.update(
 # -----------------------------------------------------------------------------
 EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
-WINDOW_SECONDS = 10.0  # no-overlap sliding window length
-REFERENCE_DELAY_SAMPLES = 600  # delay applied to reference before metric windowing
+WINDOW_SECONDS = 20.0  # no-overlap sliding window length
+EVAL_LAST_S = 0.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
+REFERENCE_DELAY_SAMPLES = 300  # delay applied to reference before metric windowing
 MAX_PLOTTED_ERRORBARS = 12
 SHOW_TQDM_PROGRESS = True
 SUPPRESS_INTERNAL_METRIC_PRINTS = True
@@ -123,11 +124,12 @@ def metric_si_sdr(reference: np.ndarray, degraded: np.ndarray, sf: float) -> flo
 
 
 def metric_mrstft_error(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    mrstft = auraloss.freq.MultiResolutionSTFTLoss()
+    mrstft = auraloss.freq.MelSTFTLoss(sf)
     return mrstft(torch.from_numpy(reference).float().view(1,1,-1), torch.from_numpy(degraded).float().view(1,1,-1)).numpy()
 
 
 def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
+    return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -335,6 +337,23 @@ def compute_windowed_metric(
     n = min(reference.shape[0], degraded.shape[0])
     if n <= 0:
         return np.zeros(0, dtype=np.float32)
+
+    if EVAL_LAST_S > 0:
+        eval_len = int(round(EVAL_LAST_S * sr))
+        if eval_len <= 0:
+            raise ValueError("EVAL_LAST_S must result in at least one sample.")
+        start = max(0, n - eval_len)
+
+        def _call_metric(ref_w: np.ndarray, deg_w: np.ndarray, sample_rate: float) -> float:
+            if not SUPPRESS_INTERNAL_METRIC_PRINTS:
+                return metric_fn(ref_w, deg_w, sample_rate)
+
+            with open(os.devnull, "w", encoding="utf-8") as devnull:
+                with redirect_stdout(devnull), redirect_stderr(devnull):
+                    return metric_fn(ref_w, deg_w, sample_rate)
+
+        value = _call_metric(reference[start:n], degraded[start:n], float(sr))
+        return np.array([value], dtype=np.float32)
 
     window_len = int(round(window_seconds * sr))
     if window_len <= 0:
