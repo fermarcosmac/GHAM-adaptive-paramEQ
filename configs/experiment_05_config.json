@@ -8,7 +8,7 @@
     "hop_len": [8192],
     "forget_factor": [0.05],
     "target_response_type": ["delay_and_mag"],
-    "n_rirs": [3],
+    "n_rirs": [1],
     "transition_time_s": [1.0, 15.0, 30.0]
   },
   "proposed_configs": [
@@ -38,8 +38,8 @@
     }
   },
   "input": {
-    "use_white_noise": false,
-    "use_songs_folder": true,
+    "use_white_noise": true,
+    "use_songs_folder": false,
     "max_num_songs": 3,
     "max_audio_len_s": [30.0]
   }

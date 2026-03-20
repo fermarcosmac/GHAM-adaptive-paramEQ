@@ -2,6 +2,7 @@
 data/SoundCam/*
 data/MedleyDB/*
 data/audio/output/*
+.vscode/*
 
 # Except this file
 !data/SoundCam/.gitkeep

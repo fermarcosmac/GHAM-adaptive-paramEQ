@@ -9,7 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "python": "C:\\Users\\ferma\\.conda\\envs\\AudioEval\\python.exe",
+            "python": "C:\\Users\\nuevo-gaps\\.conda\\envs\\DAFx26\\python.exe",
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
