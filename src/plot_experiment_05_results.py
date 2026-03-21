@@ -98,6 +98,8 @@ def plot_results(experiment_name: str) -> None:
     for row, tt in enumerate(transition_times):
         ax_td = axes[row, 0]
         ax_val = axes[row, 1]
+        ax_td.set_ylim([0.0, 0.02])
+        ax_val.set_ylim([0.00, 10.0])
 
         for algo in algorithms:
             key = (tt, algo)
