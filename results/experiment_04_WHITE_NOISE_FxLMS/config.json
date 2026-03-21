@@ -1,6 +1,6 @@
 {
   "experiment_name": "experiment_04_WHITE_NOISE_FxLMS",
-  "scenario": "moving_position",
+  "scenario": "moving_person",
   "simulation_params": {
     "ROI": [
       [
@@ -28,11 +28,11 @@
         0.005
       ],
       "TD-MSE": [
-        0.1
+        0.05
       ]
     },
     "lambda_newton": {
-      "FD-MSE": 700.0,
+      "FD-MSE": 1000.0,
       "TD-MSE": 1.0
     },
     "loss_type": [
@@ -46,7 +46,7 @@
       "delay_and_mag"
     ],
     "n_rirs": [
-      3
+      2
     ],
     "n_checkpoints": [
       4
@@ -66,7 +66,7 @@
   "input": {
     "use_white_noise": true,
     "use_songs_folder": false,
-    "max_num_songs": 1,
+    "max_num_songs": 12,
     "max_audio_len_s": [
       180.0
     ]

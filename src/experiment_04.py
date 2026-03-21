@@ -23,9 +23,10 @@ def set_seed(seed: int) -> None:
     """Seed Python, NumPy, and PyTorch (CPU/CUDA) for reproducible runs."""
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
+    #torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        #torch.cuda.manual_seed_all(seed)
+        pass
 
 
 def _song_stem(input_spec) -> str:
@@ -49,7 +50,7 @@ def _song_stem(input_spec) -> str:
 def main() -> None:
 
     # Load configuration
-    config_path = root / "configs" / "experiment_04_config.json"
+    config_path = root / "configs" / "experiment_04_config_debug.json"
     cfg = load_config(config_path)
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
