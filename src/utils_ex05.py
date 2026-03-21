@@ -9,7 +9,9 @@ import torch
 import torch.nn.functional as F
 import torchaudio
 from scipy.signal import lfilter, minimum_phase
+from tqdm import tqdm
 
+from lib.local_pyaec.time_domain_adaptive_filters import fxlms as lib_fxlms
 from lib.local_pyaec.frequency_domain_adaptive_filters import fxfdaf as lib_fxfdaf
 from utils_ex04 import (
     build_target_response_lin_phase,
@@ -188,99 +190,37 @@ def _fxlms_frame(
     x_hat_state: np.ndarray,
     sec_state: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    """One frame update for sample-wise FxLMS with explicit secondary-path simulation."""
-    m = len(x_block)
-    e = np.zeros(m, dtype=np.float64)
-    y_ctrl = np.zeros(m, dtype=np.float64)
-    y_sec = np.zeros(m, dtype=np.float64)
-
-    for i in range(m):
-        u_state[1:] = u_state[:-1]
-        u_state[0] = x_block[i]
-        y_ctrl_i = float(np.dot(w, u_state))
-
-        sec_state[1:] = sec_state[:-1]
-        sec_state[0] = y_ctrl_i
-        y_sec_i = float(np.dot(lem_ir, sec_state))
-
-        e_i = d_block[i] - y_sec_i
-
-        x_hat_state[1:] = x_hat_state[:-1]
-        x_hat_state[0] = x_block[i]
-        x_f_i = float(np.dot(h_hat, x_hat_state))
-
-        u_f_state[1:] = u_f_state[:-1]
-        u_f_state[0] = x_f_i
-        w += mu * e_i * u_f_state
-
-        e[i] = e_i
-        y_ctrl[i] = y_ctrl_i
-        y_sec[i] = y_sec_i
-
-    return e, y_ctrl, y_sec, w, u_state, u_f_state, x_hat_state
+    """Wrapper around local_pyaec FxLMS for one frame-sized block."""
+    e, w_new = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu)
+    y_out = d_block - e
+    # local_pyaec fxlms does not expose control output directly; use y_out for logging.
+    y_ctrl = y_out.copy()
+    return e, y_ctrl, y_out, w_new, u_state, u_f_state, x_hat_state
 
 
-class _LocalFxFDAF:
-    """Simple block FxFDAF fallback when library fxfdaf is not implemented."""
+def _fxfdaf_frame(
+    x_block: np.ndarray,
+    d_block: np.ndarray,
+    h_hat: np.ndarray,
+    w: np.ndarray,
+    mu: float,
+    beta: float,
+    block_size: int,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Wrapper around local_pyaec FxFDAF for one frame-sized block."""
+    fx_out = lib_fxfdaf.fxfdaf(x_block, d_block, h_hat=h_hat, M=block_size, mu=mu, beta=beta)
 
-    def __init__(self, block_size: int, mu: float, beta: float):
-        self.m = int(block_size)
-        self.mu = float(mu)
-        self.beta = float(beta)
-        self.window = np.hanning(self.m)
-        self.h = np.zeros(self.m + 1, dtype=np.complex128)
-        self.norm = np.full(self.m + 1, 1e-8, dtype=np.float64)
-        self.x_old = np.zeros(self.m, dtype=np.float64)
-        self.xf_old = np.zeros(self.m, dtype=np.float64)
+    # Support both e-only and (e, w) return conventions.
+    if isinstance(fx_out, tuple):
+        e = np.asarray(fx_out[0], dtype=np.float64)
+        w_new = np.asarray(fx_out[1], dtype=np.float64) if len(fx_out) > 1 else w
+    else:
+        e = np.asarray(fx_out, dtype=np.float64)
+        w_new = w
 
-        self.ctrl_state = np.zeros(self.m, dtype=np.float64)
-        self.sec_state = None
-        self.xhat_state = None
-
-    def run_frame(self, x: np.ndarray, d: np.ndarray, lem_ir: np.ndarray, h_hat: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        if self.sec_state is None:
-            self.sec_state = np.zeros(len(lem_ir), dtype=np.float64)
-        if self.xhat_state is None:
-            self.xhat_state = np.zeros(len(h_hat), dtype=np.float64)
-
-        # Build filtered-x block for adaptation.
-        xf = np.zeros_like(x)
-        for i in range(len(x)):
-            self.xhat_state[1:] = self.xhat_state[:-1]
-            self.xhat_state[0] = x[i]
-            xf[i] = float(np.dot(h_hat, self.xhat_state))
-
-        x2 = np.concatenate([self.x_old, x])
-        xf2 = np.concatenate([self.xf_old, xf])
-        self.x_old = x.copy()
-        self.xf_old = xf.copy()
-
-        x2_fft = np.fft.rfft(x2)
-        xf2_fft = np.fft.rfft(xf2)
-
-        y_ctrl = np.fft.irfft(self.h * x2_fft, n=2 * self.m)[self.m:]
-
-        y_sec = np.zeros_like(y_ctrl)
-        for i in range(len(y_ctrl)):
-            self.sec_state[1:] = self.sec_state[:-1]
-            self.sec_state[0] = y_ctrl[i]
-            y_sec[i] = float(np.dot(lem_ir, self.sec_state))
-
-        e = d - y_sec
-
-        e2 = np.concatenate([np.zeros(self.m, dtype=np.float64), e * self.window])
-        e2_fft = np.fft.rfft(e2)
-
-        self.norm = self.beta * self.norm + (1.0 - self.beta) * (np.abs(xf2_fft) ** 2)
-        g = self.mu * e2_fft / (self.norm + 1e-3)
-        self.h = self.h + np.conj(xf2_fft) * g
-
-        h_td = np.fft.irfft(self.h, n=2 * self.m)
-        h_td[self.m:] = 0.0
-        self.h = np.fft.rfft(h_td)
-
-        return e, y_ctrl, y_sec, h_td[: self.m].copy()
-
+    y_out = d_block - e
+    y_ctrl = y_out.copy()
+    return e, y_ctrl, y_out, w_new
 
 def run_fir_baseline_experiment(
     sim_cfg: Dict[str, Any],
@@ -326,8 +266,6 @@ def run_fir_baseline_experiment(
     x_hat_state = np.zeros(len(h_hat), dtype=np.float64)
     sec_state = np.zeros(len(rir_ctx["rirs"][0]), dtype=np.float64)
 
-    fdf = _LocalFxFDAF(block_size=frame_len, mu=mu, beta=beta)
-
     n_frames = (len(x) - frame_len) // hop_len + 1
     td_mse_history: List[float] = []
     val_history: List[float] = []
@@ -341,14 +279,7 @@ def run_fir_baseline_experiment(
 
     transition_times = rir_ctx["transition_times_s"] if int(sim_cfg["n_rirs"]) > 1 else None
 
-    lib_fxfdaf_available = True
-    if algorithm == "FxFDAF":
-        try:
-            _ = lib_fxfdaf.fxfdaf(np.zeros(frame_len), np.zeros(frame_len), h_hat, frame_len, mu=mu, beta=beta)
-        except Exception:
-            lib_fxfdaf_available = False
-
-    for k in range(n_frames):
+    for k in tqdm(range(n_frames), desc=f"{algorithm} baseline", unit="frame"):
         start = k * hop_len
         stop = start + frame_len
         now_s = float(start / sr)
@@ -373,11 +304,15 @@ def run_fir_baseline_experiment(
                 sec_state,
             )
         elif algorithm == "FxFDAF":
-            if lib_fxfdaf_available:
-                # Library path is currently unimplemented in local_pyaec; keep fallback deterministic.
-                e_fr, y_ctrl_fr, y_out_fr, w_fr = fdf.run_frame(x_fr, d_fr, lem_ir, h_hat)
-            else:
-                e_fr, y_ctrl_fr, y_out_fr, w_fr = fdf.run_frame(x_fr, d_fr, lem_ir, h_hat)
+            e_fr, y_ctrl_fr, y_out_fr, w_fr = _fxfdaf_frame(
+                x_block=x_fr,
+                d_block=d_fr,
+                h_hat=h_hat,
+                w=w,
+                mu=mu,
+                beta=beta,
+                block_size=frame_len,
+            )
             w = np.zeros_like(w)
             w[: min(len(w), len(w_fr))] = w_fr[: min(len(w), len(w_fr))]
         else:

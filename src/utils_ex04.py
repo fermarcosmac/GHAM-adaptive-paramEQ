@@ -911,6 +911,15 @@ def squared_error(y_pred: torch.Tensor, y_true: torch.Tensor) -> torch.Tensor:
     return (y_pred - y_true) ** 2
 
 
+def _safe_complex_abs(x: torch.Tensor, eps: float = 0.0) -> torch.Tensor:
+    """Compute magnitude without relying on complex torch.abs CUDA JIT kernels."""
+    if torch.is_complex(x):
+        re = torch.real(x)
+        im = torch.imag(x)
+        return torch.sqrt(re * re + im * im + eps)
+    return torch.abs(x)
+
+
 def update_LEM(current_time_s, n_rirs, transition_times_s, rirs_tensors):
     """Update LEM based on current time and transition schedule.
     
@@ -1001,8 +1010,8 @@ def interpolate_IRs(alpha, prev_rir: torch.Tensor, curr_rir: torch.Tensor) -> to
     eps = 1e-12
 
     # Magnitudes and phases
-    mag1 = torch.abs(H1)
-    mag2 = torch.abs(H2)
+    mag1 = _safe_complex_abs(H1)
+    mag2 = _safe_complex_abs(H2)
 
     # Convert magnitude to dB for interpolation (more perceptually linear)
     mag_db1 = 20.0 * torch.log10(mag1 + eps)
@@ -1741,10 +1750,10 @@ def params_to_loss(EQG_params,
             # Compute full soundsystem (EQ+LEM) frequency response
             H_SS = kirkeby_deconvolve(in_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
 
-            H_mag_db_current = 20*torch.log10(torch.abs(H_SS) + eps)
+            H_mag_db_current = 20 * torch.log10(_safe_complex_abs(H_SS, eps=eps))
             H_mag_db = (forget_factor_loss)*H_mag_db_current + (1-forget_factor_loss)*est_mag_response_buffer.squeeze()
             est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
-            desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+            desired_mag_db = 20 * torch.log10(_safe_complex_abs(torch.fft.rfft(target_response.squeeze(), n=nfft), eps=eps))
 
             # ROI-limited responses
             freqs_roi = freqs[roi_mask]
@@ -1865,12 +1874,12 @@ def process_buffers(EQG_params,
     H_SS = kirkeby_deconvolve(in_buffer.squeeze(), LEM_out_buffer[:, :, :frame_len].squeeze(), nfft, sr, ROI)
 
     # Compute magnitude responses
-    H_mag_db_current = 20*torch.log10(torch.abs(H_SS) + eps)
+    H_mag_db_current = 20 * torch.log10(_safe_complex_abs(H_SS, eps=eps))
     H_mag_db = (forget_factor_loss)*H_mag_db_current + (1-forget_factor_loss)*est_mag_response_buffer.squeeze()
     est_mag_response_buffer = H_mag_db.view(1,1,-1).detach()
-    desired_mag_db = 20*torch.log10(torch.abs(torch.fft.rfft(target_response.squeeze(), n=nfft)) + eps)
+    desired_mag_db = 20 * torch.log10(_safe_complex_abs(torch.fft.rfft(target_response.squeeze(), n=nfft), eps=eps))
     LEM_H = torch.fft.rfft(LEM.squeeze(), n=nfft)
-    LEM_mag_db = 20 * torch.log10(torch.abs(LEM_H) + eps)
+    LEM_mag_db = 20 * torch.log10(_safe_complex_abs(LEM_H, eps=eps))
 
     # ROI-limited responses (keep as tensors)
     freqs_roi = freqs[roi_mask]
@@ -1881,7 +1890,7 @@ def process_buffers(EQG_params,
 
     # ROI-limited running complex estimate magnitude (from est_cpx_response_buffer)
     H_est_cpx_complex = torch.view_as_complex(est_cpx_response_buffer.squeeze())
-    H_est_cpx_mag_db = 20 * torch.log10(torch.abs(H_est_cpx_complex) + eps)
+    H_est_cpx_mag_db = 20 * torch.log10(_safe_complex_abs(H_est_cpx_complex, eps=eps))
     H_est_cpx_mag_db_roi = H_est_cpx_mag_db[roi_mask]
 
     # Resample to log-frequency axis for perceptually-uniform processing
