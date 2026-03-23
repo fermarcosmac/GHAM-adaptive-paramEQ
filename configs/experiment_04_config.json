@@ -1,5 +1,5 @@
 {
-  "experiment_name": "experiment_04_WHITE_NOISE_MOVING_PERSON",
+  "experiment_name": "experiment_04_ALL_SONGS_STATIC",
   "scenario": "moving_person",
   "simulation_params": {
     "ROI": [[50.0, 20000.0]],
@@ -22,15 +22,15 @@
       "TD-MSE": 0.0
     },
     "target_response_type": ["delay_and_mag"],
-    "n_rirs": [3],
+    "n_rirs": [1],
     "n_checkpoints": [4],
     "transition_time_s": [1.0, 15.0, 30.0],
     "use_true_LEM": [false],
     "debug_plot": [false]
   },
   "input": {
-    "use_white_noise": true,
-    "use_songs_folder": false,
+    "use_white_noise": false,
+    "use_songs_folder": true,
     "max_num_songs": 12,
     "max_audio_len_s": [180.0]
   }
