@@ -11,6 +11,28 @@ import numpy as np
 root = Path(__file__).resolve().parent.parent
 
 
+def _log_smooth_curve(freq_hz, mag_db, window_pts: int = 61):
+    """Return a moving-average smoothed curve over a log-frequency grid."""
+    f = np.asarray(freq_hz, dtype=float)
+    y = np.asarray(mag_db, dtype=float)
+    m = np.isfinite(f) & np.isfinite(y) & (f > 0)
+    f = f[m]
+    y = y[m]
+    if f.size < 3:
+        return f, y
+
+    n_log = max(256, f.size)
+    f_log = np.logspace(np.log10(f[0]), np.log10(f[-1]), n_log)
+    y_log = np.interp(f_log, f, y)
+
+    w = max(5, int(window_pts))
+    if w % 2 == 0:
+        w += 1
+    kernel = np.ones(w, dtype=float) / w
+    y_smooth = np.convolve(y_log, kernel, mode="same")
+    return f_log, y_smooth
+
+
 def load_results(experiment_name: str) -> tuple[dict, dict, Path]:
     results_root = root / "results" / experiment_name
     cfg_path = results_root / "config.json"
@@ -77,8 +99,14 @@ def _plot_response_mean_std(ax, series, color, label):
     avg = np.mean(y, axis=0)
     std = np.std(y, axis=0)
     m = ref_f > 0
-    ax.plot(ref_f[m], avg[m], color=color, linewidth=1.2, label=label)
-    ax.fill_between(ref_f[m], (avg - std)[m], (avg + std)[m], color=color, alpha=0.18, linewidth=0)
+    # Raw mean curve in the background (same color, dimmer).
+    ax.plot(ref_f[m], avg[m], color=color, linewidth=0.9, alpha=0.25)
+
+    # Smoothed curve in front.
+    f_s, avg_s = _log_smooth_curve(ref_f[m], avg[m], window_pts=121)
+    _, std_s = _log_smooth_curve(ref_f[m], std[m], window_pts=121)
+    ax.plot(f_s, avg_s, color=color, linewidth=1.25, label=label)
+    ax.fill_between(f_s, avg_s - std_s, avg_s + std_s, color=color, alpha=0.16, linewidth=0)
 
 
 def plot_results(experiment_name: str) -> None:
@@ -90,6 +118,7 @@ def plot_results(experiment_name: str) -> None:
     compute_time_stats = data.get("compute_time_stats", {})
     tt_transitions = data.get("tt_transitions", {})
     target_example = data.get("target_response_example", None)
+    true_lem_example = data.get("true_lem_response_example", None)
 
     if not td_mse_curves or not validation_curves:
         print("No curves found in plot data.")
@@ -163,12 +192,21 @@ def plot_results(experiment_name: str) -> None:
     if handles:
         axes[0, 0].legend(handles, labels, loc="upper right", fontsize=8)
 
-    # Bottom subplot: desired response and final equalized response for all methods.
+    # Bottom subplot: desired response, true LEM (unprocessed), and final equalized response.
     if target_example is not None and len(target_example.get("freq_axis", [])):
         f = np.asarray(target_example["freq_axis"], dtype=float)
         tdb = np.asarray(target_example["target_mag_db"], dtype=float)
         m = f > 0
-        ax_resp.plot(f[m], tdb[m], color="black", linestyle="--", linewidth=1.3, label="Desired")
+        ax_resp.plot(f[m], tdb[m], color="black", linestyle="-", linewidth=1.3, label="Desired")
+
+    if true_lem_example is not None and len(true_lem_example.get("freq_axis", [])):
+        f_lem = np.asarray(true_lem_example["freq_axis"], dtype=float)
+        lem_db = np.asarray(true_lem_example["lem_mag_db"], dtype=float)
+        m_lem = (f_lem > 0) & np.isfinite(lem_db)
+        f_lem_s, lem_db_s = _log_smooth_curve(f_lem[m_lem], lem_db[m_lem], window_pts=121)
+        ax_resp.plot(f_lem_s, lem_db_s, color="black", linestyle="--", linewidth=1.1, label="True LEM (unprocessed)")
+    else:
+        print("No true_lem_response_example found in plot data. Re-run experiment_05.py after saving true LEM response to include dashed black reference.")
 
     if final_response_curves:
         by_algo = {algo: [] for algo in algorithms}
@@ -182,6 +220,7 @@ def plot_results(experiment_name: str) -> None:
         print("No final_response_curves found in plot data. Re-run experiment_05.py to populate final equalized response subplot.")
 
     ax_resp.set_xscale("log")
+    ax_resp.set_xlim(20, 24000)
     ax_resp.set_xlabel("Frequency [Hz]")
     ax_resp.set_ylabel("Magnitude [dB]")
     ax_resp.set_title("Desired vs Final Equalized Response")

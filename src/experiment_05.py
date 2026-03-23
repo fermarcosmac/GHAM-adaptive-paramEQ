@@ -126,6 +126,7 @@ def main() -> None:
 
 	# Optional metadata for plotting target response if available.
 	target_response_example = None
+	true_lem_response_example = None
 
 	base_cfgs = list(iter_param_grid(shared_grid))
 	combo_total = len(base_cfgs) * max(1, len(input_signals))
@@ -246,6 +247,12 @@ def main() -> None:
 						"target_mag_db": np.asarray(fir_result.get("target_mag_db", []), dtype=np.float32),
 					}
 
+				if true_lem_response_example is None:
+					true_lem_response_example = {
+						"freq_axis": np.asarray(fir_result.get("true_lem_freq_axis", []), dtype=np.float32),
+						"lem_mag_db": np.asarray(fir_result.get("true_lem_mag_db", []), dtype=np.float32),
+					}
+
 	results_root = root / "results" / experiment_name
 	results_root.mkdir(parents=True, exist_ok=True)
 
@@ -261,6 +268,7 @@ def main() -> None:
 		"tt_transitions": tt_transitions,
 		"input_signals": sorted(input_ids_used),
 		"target_response_example": target_response_example,
+		"true_lem_response_example": true_lem_response_example,
 	}
 	out_path = results_root / "plot1_data.pkl"
 	with out_path.open("wb") as f:

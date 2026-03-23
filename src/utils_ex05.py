@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
+from numpy.fft import fft
+from numpy.fft import ifft
 import torch
 import torch.nn.functional as F
 import torchaudio
@@ -211,15 +213,9 @@ def _fxfdaf_frame(
     block_size: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Wrapper around local_pyaec FxFDAF for one frame-sized block."""
-    fx_out = lib_fxfdaf.fxfdaf(x_block, d_block, h_hat=h_hat, M=block_size, mu=mu, beta=beta)
-
-    # Support both e-only and (e, w) return conventions.
-    if isinstance(fx_out, tuple):
-        e = np.asarray(fx_out[0], dtype=np.float64)
-        w_new = np.asarray(fx_out[1], dtype=np.float64) if len(fx_out) > 1 else w
-    else:
-        e = np.asarray(fx_out, dtype=np.float64)
-        w_new = w
+    W = fft(w,n=block_size+1)
+    e, W_new = lib_fxfdaf.fxfdaf(x_block, d_block, h_hat=h_hat, M=block_size, mu=mu, beta=beta, W_init=W)
+    w_new = ifft(W_new, n=block_size+1)
 
     y_out = d_block - e
     y_ctrl = y_out.copy()
@@ -251,6 +247,11 @@ def run_fir_baseline_experiment(
     h_target = target_ctx["h_target"]
     freqs = target_ctx["freqs"]
     target_db = target_ctx["target_db"]
+    nfft = int((len(freqs) - 1) * 2)
+
+    # Unprocessed (true) LEM response used as reference in result plots.
+    true_lem_ir = np.asarray(rir_ctx["rirs"][0], dtype=np.float64)
+    true_lem_mag_db = 20.0 * np.log10(np.abs(np.fft.rfft(true_lem_ir, n=nfft)) + 1e-8)
 
     d_full = np.convolve(x, h_target, mode="full")[: len(x)]
 
@@ -354,6 +355,8 @@ def run_fir_baseline_experiment(
         "y_out": y_out.astype(np.float64),
         "target_freq_axis": freqs.astype(np.float32),
         "target_mag_db": target_db.astype(np.float32),
+        "true_lem_freq_axis": freqs.astype(np.float32),
+        "true_lem_mag_db": true_lem_mag_db.astype(np.float32),
         "sr": sr,
         "n_frames": int(n_frames),
         "control_experiment_time_s": elapsed,
