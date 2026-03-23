@@ -40,8 +40,8 @@ mpl.rcParams.update(
 # -----------------------------------------------------------------------------
 EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
-WINDOW_SECONDS = 20.0  # no-overlap sliding window length
-EVAL_LAST_S = 0.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
+WINDOW_SECONDS = 150.0  # no-overlap sliding window length
+EVAL_LAST_S = 150.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
 REFERENCE_DELAY_SAMPLES = 300  # delay applied to reference before metric windowing
 MAX_PLOTTED_ERRORBARS = 12
 SHOW_TQDM_PROGRESS = True
@@ -86,7 +86,7 @@ def apply_sample_delay(x: np.ndarray, delay_samples: int) -> np.ndarray:
 
 
 def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
+    #return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -129,7 +129,7 @@ def metric_mrstft_error(reference: np.ndarray, degraded: np.ndarray, sf: float) 
 
 
 def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
+    #return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -168,7 +168,7 @@ def metric_mel_spectral_distance(reference: np.ndarray, degraded: np.ndarray, sf
 
 
 def metric_spectral_centroid_delta(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
+    #return 0.0
     if spectral_centroid is None:
         raise ImportError(
             "librosa is required for spectral centroid metric. "
@@ -200,7 +200,7 @@ def metric_spectral_flatness_delta(reference: np.ndarray, degraded: np.ndarray, 
 
 
 def metric_rmse(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
+    #return 0.0
     n = min(reference.shape[0], degraded.shape[0])
     if n == 0:
         return np.nan
@@ -209,7 +209,7 @@ def metric_rmse(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float
 
 
 def metric_lufs_difference(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
-    return 0.0
+    #return 0.0
     loudness_ref = loudness(torch.from_numpy(reference).view(1,-1), sample_rate=int(sf)).item()
     loudness_deg = loudness(torch.from_numpy(degraded).view(1,-1), sample_rate=int(sf)).item()
     return np.abs(loudness_ref - loudness_deg)

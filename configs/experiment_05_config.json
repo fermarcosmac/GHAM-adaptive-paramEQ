@@ -34,13 +34,13 @@
       "enabled": true,
       "mu": 0.01,
       "beta": 0.95,
-      "filter_len": 512
+      "filter_len": 1024
     }
   },
   "input": {
     "use_white_noise": true,
     "use_songs_folder": false,
     "max_num_songs": 1,
-    "max_audio_len_s": [60.0]
+    "max_audio_len_s": [120.0]
   }
 }
