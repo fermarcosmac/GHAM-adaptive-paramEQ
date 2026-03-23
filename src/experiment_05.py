@@ -48,6 +48,47 @@ def _framewise_mse(reference: np.ndarray, estimate: np.ndarray, frame_len: int, 
 	return out
 
 
+def _estimate_final_equalized_response(
+	input_audio: np.ndarray,
+	output_audio: np.ndarray,
+	sr: int,
+	frame_len: int,
+) -> tuple[np.ndarray, np.ndarray]:
+	"""Estimate final equalized transfer magnitude (dB) from last analysis window."""
+	x = np.asarray(input_audio, dtype=np.float64)
+	y = np.asarray(output_audio, dtype=np.float64)
+	x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+	y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+	n = min(len(x), len(y))
+	if n < 8:
+		return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+
+	win_len = min(n, max(8 * int(frame_len), 4096))
+	x_seg = x[n - win_len : n]
+	y_seg = y[n - win_len : n]
+
+	window = np.hanning(win_len)
+	xw = x_seg * window
+	yw = y_seg * window
+
+	x_peak = float(np.max(np.abs(xw))) if xw.size else 0.0
+	y_peak = float(np.max(np.abs(yw))) if yw.size else 0.0
+	if x_peak > 0:
+		xw = xw / x_peak
+	if y_peak > 0:
+		yw = yw / y_peak
+
+	nfft = int(2 ** np.ceil(np.log2(max(win_len, 512))))
+	X = np.fft.rfft(xw, n=nfft)
+	Y = np.fft.rfft(yw, n=nfft)
+	H = Y / (X + 1e-12)
+	freqs = np.fft.rfftfreq(nfft, d=1.0 / float(sr))
+	mag_db = 20.0 * np.log10(np.abs(H) + 1e-12)
+	mag_db = np.nan_to_num(mag_db, nan=-120.0, posinf=120.0, neginf=-120.0)
+	mag_db = np.clip(mag_db, -120.0, 120.0)
+	return freqs.astype(np.float64), mag_db.astype(np.float64)
+
+
 def main() -> None:
 	cfg = load_config(root / "configs" / "experiment_05_config.json")
 	seed = int(cfg.get("seed", 124))
@@ -81,6 +122,7 @@ def main() -> None:
 	compute_time_stats = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
 	tt_transitions = {}
 	input_ids_used = set()
+	final_response_curves = defaultdict(list)
 
 	# Optional metadata for plotting target response if available.
 	target_response_example = None
@@ -149,6 +191,15 @@ def main() -> None:
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))
 
+				resp_f, resp_db = _estimate_final_equalized_response(
+					input_audio=np.asarray(result.get("input_audio", []), dtype=np.float64),
+					output_audio=np.asarray(result.get("y_control", []), dtype=np.float64),
+					sr=int(result.get("sr", sim_cfg.get("sr", 48000))),
+					frame_len=frame_len,
+				)
+				if resp_f.size and resp_db.size:
+					final_response_curves[key].append((resp_f, resp_db))
+
 				ct_key = key
 				compute_time_stats[ct_key]["total_time_s"] += float(result.get("control_experiment_time_s", 0.0))
 				compute_time_stats[ct_key]["total_frames"] += int(result.get("n_frames", 0))
@@ -173,6 +224,15 @@ def main() -> None:
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))
 
+				resp_f, resp_db = _estimate_final_equalized_response(
+					input_audio=np.asarray(fir_result.get("input_audio", []), dtype=np.float64),
+					output_audio=np.asarray(fir_result.get("y_control", []), dtype=np.float64),
+					sr=int(fir_result.get("sr", sim_cfg.get("sr", 48000))),
+					frame_len=frame_len,
+				)
+				if resp_f.size and resp_db.size:
+					final_response_curves[key].append((resp_f, resp_db))
+
 				compute_time_stats[key]["total_time_s"] += float(fir_result.get("control_experiment_time_s", 0.0))
 				compute_time_stats[key]["total_frames"] += int(fir_result.get("n_frames", 0))
 				compute_time_stats[key]["num_runs"] += 1
@@ -196,6 +256,7 @@ def main() -> None:
 	plot_data = {
 		"td_mse_curves": dict(td_mse_curves),
 		"validation_curves": dict(validation_curves),
+		"final_response_curves": dict(final_response_curves),
 		"compute_time_stats": dict(compute_time_stats),
 		"tt_transitions": tt_transitions,
 		"input_signals": sorted(input_ids_used),

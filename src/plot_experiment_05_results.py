@@ -55,11 +55,38 @@ def _plot_mean_std(ax, series, color, label):
     ax.errorbar(t[idx], avg[idx], yerr=std[idx], fmt="none", ecolor=color, elinewidth=0.9, capsize=3, alpha=0.75)
 
 
+def _plot_response_mean_std(ax, series, color, label):
+    if not series:
+        return
+    ref_f = np.asarray(series[0][0], dtype=float)
+    if ref_f.size < 2:
+        return
+
+    stack = []
+    for f, mag_db in series:
+        f = np.asarray(f, dtype=float)
+        mag_db = np.asarray(mag_db, dtype=float)
+        if f.size < 2 or mag_db.size != f.size or np.isnan(mag_db).any():
+            continue
+        stack.append(np.interp(ref_f, f, mag_db))
+
+    if not stack:
+        return
+
+    y = np.stack(stack, axis=0)
+    avg = np.mean(y, axis=0)
+    std = np.std(y, axis=0)
+    m = ref_f > 0
+    ax.plot(ref_f[m], avg[m], color=color, linewidth=1.2, label=label)
+    ax.fill_between(ref_f[m], (avg - std)[m], (avg + std)[m], color=color, alpha=0.18, linewidth=0)
+
+
 def plot_results(experiment_name: str) -> None:
     cfg, data, results_root = load_results(experiment_name)
 
     td_mse_curves = data.get("td_mse_curves", {})
     validation_curves = data.get("validation_curves", {})
+    final_response_curves = data.get("final_response_curves", {})
     compute_time_stats = data.get("compute_time_stats", {})
     tt_transitions = data.get("tt_transitions", {})
     target_example = data.get("target_response_example", None)
@@ -93,13 +120,19 @@ def plot_results(experiment_name: str) -> None:
     algo_color = {a: colors(i % 10) for i, a in enumerate(algorithms)}
 
     n_rows = len(transition_times)
-    fig, axes = plt.subplots(n_rows, 2, figsize=(10, max(2.6, 2.5 * n_rows)), squeeze=False)
+    fig = plt.figure(figsize=(10, max(4.8, 2.5 * n_rows + 2.8)))
+    gs = fig.add_gridspec(n_rows + 1, 2, height_ratios=[1.0] * n_rows + [1.2])
+    axes = np.empty((n_rows, 2), dtype=object)
+    for row in range(n_rows):
+        axes[row, 0] = fig.add_subplot(gs[row, 0])
+        axes[row, 1] = fig.add_subplot(gs[row, 1])
+    ax_resp = fig.add_subplot(gs[n_rows, :])
 
     for row, tt in enumerate(transition_times):
         ax_td = axes[row, 0]
         ax_val = axes[row, 1]
-        ax_td.set_ylim([0.0, 0.02])
-        ax_val.set_ylim([0.00, 10.0])
+        #ax_td.set_ylim([0.0, 0.02])
+        #ax_val.set_ylim([0.00, 10.0])
 
         for algo in algorithms:
             key = (tt, algo)
@@ -130,17 +163,32 @@ def plot_results(experiment_name: str) -> None:
     if handles:
         axes[0, 0].legend(handles, labels, loc="upper right", fontsize=8)
 
-    # Optional target response inset (for quick reference)
+    # Bottom subplot: desired response and final equalized response for all methods.
     if target_example is not None and len(target_example.get("freq_axis", [])):
-        ins = axes[0, 1].inset_axes([0.58, 0.57, 0.38, 0.38])
         f = np.asarray(target_example["freq_axis"], dtype=float)
         tdb = np.asarray(target_example["target_mag_db"], dtype=float)
         m = f > 0
-        ins.plot(f[m], tdb[m], color="black", linewidth=1.0)
-        ins.set_xscale("log")
-        ins.set_title("Target H(f)", fontsize=7)
-        ins.tick_params(axis="both", labelsize=6)
-        ins.grid(True, linestyle=":", linewidth=0.4, alpha=0.6)
+        ax_resp.plot(f[m], tdb[m], color="black", linestyle="--", linewidth=1.3, label="Desired")
+
+    if final_response_curves:
+        by_algo = {algo: [] for algo in algorithms}
+        for (tt, algo), series in final_response_curves.items():
+            if algo not in by_algo:
+                by_algo[algo] = []
+            by_algo[algo].extend(series)
+        for algo in sorted(by_algo.keys()):
+            _plot_response_mean_std(ax_resp, by_algo[algo], algo_color.get(algo, "C0"), algo)
+    else:
+        print("No final_response_curves found in plot data. Re-run experiment_05.py to populate final equalized response subplot.")
+
+    ax_resp.set_xscale("log")
+    ax_resp.set_xlabel("Frequency [Hz]")
+    ax_resp.set_ylabel("Magnitude [dB]")
+    ax_resp.set_title("Desired vs Final Equalized Response")
+    ax_resp.grid(True, linestyle=":", linewidth=0.6, alpha=0.8)
+    handles_resp, labels_resp = ax_resp.get_legend_handles_labels()
+    if handles_resp:
+        ax_resp.legend(handles_resp, labels_resp, loc="best", fontsize=8)
 
     fig.tight_layout()
     out_png = results_root / f"{experiment_name}_curves.png"
