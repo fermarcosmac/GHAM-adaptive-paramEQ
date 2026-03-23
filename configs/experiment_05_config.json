@@ -31,7 +31,7 @@
       "filter_len": 1024
     },
     "FxFDAF": {
-      "enabled": true,
+      "enabled": false,
       "mu": 0.05,
       "beta": 0.9,
       "filter_len": 1024

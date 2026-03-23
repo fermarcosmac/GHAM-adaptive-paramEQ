@@ -17,10 +17,14 @@
 
 import numpy as np
 
-def fxlms(x, d, h_hat, N = 4, mu = 0.1):
+def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None):
   x = np.asarray(x, dtype=float)
   d = np.asarray(d, dtype=float)
   h_hat = np.asarray(h_hat, dtype=float)
+  if w_init is None:
+    w = np.zeros(N)
+  else: # if provided, don't initialize controller filter in each call
+    w = np.asarray(w_init, dtype=float)
 
   N = int(N)
   if N <= 0:
@@ -39,7 +43,6 @@ def fxlms(x, d, h_hat, N = 4, mu = 0.1):
   # State for online FIR filtering by h_hat.
   x_state = np.zeros(h_hat.size)
 
-  w = np.zeros(N)
   e = np.zeros(nIters)
 
   for n in range(nIters):

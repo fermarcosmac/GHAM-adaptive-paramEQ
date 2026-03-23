@@ -71,11 +71,11 @@ if __name__ == "__main__":
     # input_type = "guitar-riff_short.wav"  # Uncomment to use guitar audio
     
     # Maximum duration for audio files (None = use full audio)
-    max_audio_duration = 10.0  # Limit audio to first 10 seconds
+    max_audio_duration = 20.0  # Limit audio to first 10 seconds
     
     # Set simulation parameters
     sr = 48000  # Sample rate (will be updated if RIR has different rate)
-    T_seconds = 20.0  # Simulation duration in seconds (used for white noise and identification)
+    T_seconds = 10.0  # Simulation duration in seconds (used for white noise and identification)
     
     # Load RIR for secondary path S(z)
     # The RIR represents the acoustic path from actuator (speaker) to sensor (microphone)
@@ -85,7 +85,8 @@ if __name__ == "__main__":
     sr = rirs_srs[0]
     rirs = ensure_rirs_sample_rate(rirs, rirs_srs, sr)
     rir = rirs[0]  # Use first RIR
-    
+    rir = rir[900:1100]
+
     # S(z): Secondary path coefficients from loaded RIR
     # Truncate or use full RIR based on desired filter length
     Sw_max_len = min(len(rir), 8192*2)  # Limit secondary path length for computational efficiency
@@ -95,7 +96,7 @@ if __name__ == "__main__":
     # === PRIMARY PATH FILTER CONFIGURATION ===
     # Design a lowpass FIR filter for the primary path P(z)
     Pw_len = 64  # Filter length for primary path (number of taps)
-    Pw_cutoff = 4000.0  # Cutoff frequency in Hz
+    Pw_cutoff = 18000.0  # Cutoff frequency in Hz
     
     # Design lowpass filter using firwin
     from scipy.signal import firwin
@@ -114,7 +115,7 @@ if __name__ == "__main__":
     
     # Estimate delay from the RIR (position of first peak = direct sound arrival)
     est_delay = get_delay_from_ir(rir, sr)
-    est_delay += 128 # Hardcoded! Half the compensating filter length
+    #est_delay += 256 # Hardcoded! Half the compensating filter length
     print(f"Estimated delay from RIR: {est_delay} samples ({est_delay/sr*1000:.2f} ms)")
     
     # Zero-pad Pw at the beginning to incorporate the delay into the filter itself
@@ -254,7 +255,7 @@ if __name__ == "__main__":
     
     # Apply the FxLMS algorithm
     # Learning rate needs to be smaller for real RIRs
-    mu_cont = 0.001 / C_len  # Normalized learning rate for controller
+    mu_cont = 0.01 / C_len  # Normalized learning rate for controller
     
     for k in range(T):
         # Update the controller state buffer

@@ -25,9 +25,7 @@
       1
     ],
     "transition_time_s": [
-      1.0,
-      15.0,
-      30.0
+      1.0
     ]
   },
   "proposed_configs": [
@@ -50,7 +48,7 @@
       "filter_len": 1024
     },
     "FxFDAF": {
-      "enabled": true,
+      "enabled": false,
       "mu": 0.05,
       "beta": 0.9,
       "filter_len": 1024
@@ -59,7 +57,7 @@
   "input": {
     "use_white_noise": true,
     "use_songs_folder": false,
-    "max_num_songs": 3,
+    "max_num_songs": 1,
     "max_audio_len_s": [
       30.0
     ]

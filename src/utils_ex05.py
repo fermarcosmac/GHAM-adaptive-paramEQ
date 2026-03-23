@@ -194,7 +194,7 @@ def _fxlms_frame(
     # I think compensator filter is being reinitialized after each call.
     # Why does error not decrease over time?
     # TODO: debug!
-    e, w_new = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu)
+    e, w_new = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu, w_init = w)
     y_out = d_block - e
     # local_pyaec fxlms does not expose control output directly; use y_out for logging.
     y_ctrl = y_out.copy()
@@ -263,7 +263,7 @@ def run_fir_baseline_experiment(
     if h_hat.ndim != 1:
         h_hat = h_hat.reshape(-1)
 
-    w = np.zeros(n_ctrl, dtype=np.float64)
+    w = np.zeros(n_ctrl, dtype=np.float64) # control filter coefficients
     u_state = np.zeros(n_ctrl, dtype=np.float64)
     u_f_state = np.zeros(n_ctrl, dtype=np.float64)
     x_hat_state = np.zeros(len(h_hat), dtype=np.float64)
@@ -350,8 +350,8 @@ def run_fir_baseline_experiment(
         "transition_time_s": float(sim_cfg["transition_time_s"]),
         "input_audio": x.astype(np.float32),
         "desired_audio": d_full.astype(np.float32),
-        "y_control": y_control.astype(np.float32),
-        "y_out": y_out.astype(np.float32),
+        "y_control": y_control.astype(np.float64),
+        "y_out": y_out.astype(np.float64),
         "target_freq_axis": freqs.astype(np.float32),
         "target_mag_db": target_db.astype(np.float32),
         "sr": sr,

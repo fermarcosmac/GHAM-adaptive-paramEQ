@@ -21,7 +21,7 @@ from numpy.fft import irfft as ifft
 
 # TODO: implement this FxFDAF
 def fxfdaf(x, d, h_hat, M, mu=0.05, beta=0.9):
-  raise NotImplementedError("fxfdaf is not yet implemented")
+  #raise NotImplementedError("fxfdaf is not yet implemented")
   H = np.zeros(M+1,dtype=np.complex)
   norm = np.full(M+1,1e-8)
 
