@@ -307,6 +307,144 @@ def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int
     fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
 
 
+def _plot_validation_only_column_true_lem(
+    cfg: dict,
+    plot1_data: dict,
+    n_remove_highest_mean_curves: int = 0,
+) -> None:
+    """Extra figure: one column with validation curves per transition time."""
+    curves = plot1_data.get("curves", {})
+    tt_transitions = plot1_data.get("tt_transitions", {})
+    input_signals = plot1_data.get("input_signals", None)
+    run_labels = [_format_input_label(sig) for sig in input_signals] if input_signals else None
+
+    if not curves:
+        print("Skipping TRUE_LEM validation-only plot: no validation curves available.")
+        return
+
+    all_curve_keys = list(curves.keys())
+    unique_tt = sorted({k[0] for k in all_curve_keys})
+    optim_types = sorted({k[1] for k in all_curve_keys})
+    unique_loss_types = sorted({k[2] for k in all_curve_keys})
+
+    color_map = plt.get_cmap("tab10")
+    optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
+    lt_linestyle = {lt: ls for lt, ls in zip(unique_loss_types, ["-", "--", "-.", ":"])}
+
+    n_rows = len(unique_tt)
+    n_cols = 1
+
+    # Match the same subplot styling/layout conventions as _plot_dual_scenario_validation.
+    fig = plt.figure(figsize=(2.5 * n_cols + 1.5, 1.5 * n_rows + 0.8))
+    gs = fig.add_gridspec(
+        n_rows, n_cols + 1,
+        width_ratios=[0.22] + [1.0] * n_cols,
+    )
+    label_axes = [fig.add_subplot(gs[r, 0]) for r in range(n_rows)]
+    for ax_label in label_axes:
+        ax_label.set_axis_off()
+    axes = np.array([fig.add_subplot(gs[r, 1]) for r in range(n_rows)])
+
+    for row_i, tt in enumerate(unique_tt):
+        ax = axes[row_i]
+        if row_i == 0:
+            ax.set_title(r"$\mathrm{Moving\ position\ (all\ songs, \ true\ LEM)}$")
+
+        # Keep per-axis geometry consistent with the dual-scenario subplot style.
+        if hasattr(ax, "set_box_aspect"):
+            ax.set_box_aspect(1.5 / 2.5)
+
+        ax.axhline(y=1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
+
+        trans = tt_transitions.get(tt, None)
+        if trans is not None:
+            for t_start, t_end in trans:
+                ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                if t_start != t_end:
+                    ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                    ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
+
+        for lt in unique_loss_types:
+            for optim in optim_types:
+                key = (tt, optim, lt)
+                if key not in curves or not curves[key]:
+                    continue
+
+                if len(unique_loss_types) > 1:
+                    label = f"{optim.replace('_', ' ')} ({lt})"
+                else:
+                    label = optim.replace("_", " ")
+
+                _plot_mean_std(
+                    ax,
+                    curves[key],
+                    color=optim_to_color[optim],
+                    linestyle=lt_linestyle.get(lt, "-"),
+                    label=label,
+                    n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+                    run_labels=run_labels,
+                    report_context=f"TRUE_LEM | tt={tt}, optim={optim}, loss={lt}",
+                )
+
+        ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
+        ax.set_ylim(-0.2, 1.5)
+        ax.set_yticks([0, 1])
+        ax.set_yticklabels(["0", "1"])
+
+        is_bottom_row = (row_i == n_rows - 1)
+        ax.tick_params(
+            axis="x",
+            which="both",
+            bottom=is_bottom_row,
+            labelbottom=is_bottom_row,
+            top=False,
+            labeltop=False,
+        )
+        ax.tick_params(
+            axis="y",
+            which="both",
+            left=True,
+            labelleft=True,
+            right=False,
+            labelright=False,
+        )
+        if is_bottom_row:
+            ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
+
+        label_axes[row_i].text(
+            0.5, 0.5,
+            f"Transition\ntime: {tt} s",
+            transform=label_axes[row_i].transAxes,
+            ha="center",
+            va="center",
+            fontsize=9,
+        )
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        unique_h, unique_l = [], []
+        for h, l in zip(handles, labels):
+            if l in unique_l:
+                continue
+            unique_h.append(h)
+            unique_l.append(l)
+        axes[0].legend(
+            unique_h,
+            unique_l,
+            loc="upper right",
+            fontsize=7,
+            frameon=True,
+            borderpad=0.2,
+            labelspacing=0.2,
+            handlelength=1.2,
+            handletextpad=0.3,
+            columnspacing=0.6,
+            borderaxespad=0.2,
+        )
+
+    fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
+
+
 def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int = 0) -> None:
     curves = plot1_data["curves"]
     loss_curves = plot1_data.get("loss_curves", {})
@@ -644,6 +782,13 @@ def main() -> None:
         "experiment_04_WHITE_NOISE_MOVING_PERSON",
     }:
         _plot_dual_scenario_validation(root, n_remove_highest_mean_curves=n_remove_highest_mean_curves)
+
+    if experiment_name == "experiment_04_ALL_SONGS_MOVING_POSITION_TRUE_LEM":
+        _plot_validation_only_column_true_lem(
+            cfg,
+            plot1_data,
+            n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+        )
     
     plt.show()
 
