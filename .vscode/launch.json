@@ -9,12 +9,10 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "python": "C:\\Users\\ferma\\.conda\\envs\\DAFx26\\python.exe",
+            "python": "${command:python.interpreterPath}",
             "console": "integratedTerminal",
             "justMyCode": false,
             "env": {
-                "CONDA_PREFIX": "C:\\Users\\ferma\\.conda\\envs\\DAFx26",
-                "PATH": "C:\\Users\\ferma\\.conda\\envs\\DAFx26;C:\\Users\\ferma\\.conda\\envs\\DAFx26\\Library\\mingw-w64\\bin;C:\\Users\\ferma\\.conda\\envs\\DAFx26\\Library\\usr\\bin;C:\\Users\\ferma\\.conda\\envs\\DAFx26\\Library\\bin;C:\\Users\\ferma\\.conda\\envs\\DAFx26\\Scripts;C:\\Users\\ferma\\.conda\\envs\\DAFx26\\bin;${env:PATH}",
                 "PYDEVD_WARN_EVALUATION_TIMEOUT": "60",
                 "PYDEVD_UNBLOCK_THREADS_TIMEOUT": "10",
                 "PYDEVD_THREAD_DUMP_ON_WARN_EVALUATION_TIMEOUT": "true",

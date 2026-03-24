@@ -111,6 +111,7 @@ def main() -> None:
 
     # All other parameters form a full grid (includes loss_type, transition_time_s, ...)
     # lambda_newton and eps_0 are excluded from the grid if they are dicts (per-loss-type)
+    # hop_len is intentionally excluded: it is always set equal to frame_len.
     _per_loss_scalar_keys = ("lambda_newton", "eps_0")
 
     lambda_newton_raw = sim_param_grid.get("lambda_newton", None)
@@ -126,7 +127,7 @@ def main() -> None:
 
     base_param_grid = {
         k: v for k, v in sim_param_grid.items()
-        if k not in ("optim_type", "mu_opt")
+        if k not in ("optim_type", "mu_opt", "hop_len")
         and not (k in _per_loss_scalar_keys and isinstance(v, dict))
     }
 
@@ -137,12 +138,12 @@ def main() -> None:
 
     # -----------------------------------------------------------------------
     # Aggregation structures
-    # curves / loss_curves: keyed by (transition_time_s, optim_type, loss_type)
+    # curves / loss_curves: keyed by (transition_time_s, frame_len, optim_type, loss_type)
     # checkpoint_examples:  {loss_type: {optim_type: [cp, ...]}}  (first occurrence)
     # audio saved for EVERY (input_signal, optim_type, loss_type) combination
     # -----------------------------------------------------------------------
-    curves = defaultdict(list)        # (tt, optim, lt) -> [(time_axis, val_hist), ...]
-    loss_curves = defaultdict(list)   # (tt, optim, lt) -> [(time_axis, loss_hist), ...]
+    curves = defaultdict(list)        # (tt, frame_len, optim, lt) -> [(time_axis, val_hist), ...]
+    loss_curves = defaultdict(list)   # (tt, frame_len, optim, lt) -> [(time_axis, loss_hist), ...]
     compute_time_stats = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
     tt_transitions = {}               # tt -> list of (start_s, end_s)
     input_ids_used = set()
@@ -191,6 +192,9 @@ def main() -> None:
 
         for optim, mu in opt_mu_pairs:
             sim_cfg = dict(base_cfg)
+            if "frame_len" not in sim_cfg:
+                raise ValueError("'frame_len' must be provided in simulation_params.")
+            sim_cfg["hop_len"] = sim_cfg["frame_len"]
             if optim is not None:
                 sim_cfg["optim_type"] = optim
             if mu is not None:
@@ -240,20 +244,21 @@ def main() -> None:
                 input_ids_used.add(input_id)
 
                 tt = result.get("transition_time_s", sim_cfg.get("transition_time_s"))
+                frame_len_used = int(sim_cfg.get("frame_len", 0))
                 optim_used = result.get("optim_type", sim_cfg.get("optim_type"))
                 loss_type_used = loss_type_cfg  # loss_type is not echoed in result dict
                 time_axis = np.asarray(result["time_axis"], dtype=float)
                 val_hist = np.asarray(result["validation_error_history"], dtype=float)
                 loss_hist = np.asarray(result.get("loss_history", []), dtype=float)
 
-                curves[(tt, optim_used, loss_type_used)].append((time_axis, val_hist))
+                curves[(tt, frame_len_used, optim_used, loss_type_used)].append((time_axis, val_hist))
                 if loss_hist.size:
-                    loss_curves[(tt, optim_used, loss_type_used)].append((time_axis, loss_hist))
+                    loss_curves[(tt, frame_len_used, optim_used, loss_type_used)].append((time_axis, loss_hist))
 
-                # Aggregate compute-time statistics per (transition_time_s, optimizer)
+                # Aggregate compute-time statistics per (transition_time_s, frame_len, optimizer)
                 total_time_s = float(result.get("control_experiment_time_s", 0.0))
                 n_frames = int(result.get("n_frames", 0))
-                ct_key = (tt, optim_used)
+                ct_key = (tt, frame_len_used, optim_used)
                 compute_time_stats[ct_key]["total_time_s"] += total_time_s
                 compute_time_stats[ct_key]["total_frames"] += n_frames
                 compute_time_stats[ct_key]["num_runs"] += 1
@@ -279,12 +284,13 @@ def main() -> None:
                         _save_wav(audio_out_dir / f"noEQ_{song}.wav",        result["y_noEQ"],        sr_audio)
                         audio_saved_keys.add(common_key)
 
-                    # Per-(optim, loss_type, tt, song) EQ output
+                    # Per-(optim, loss_type, frame_len, tt, song) EQ output
                     safe_tt = str(tt).replace(".", "p")
-                    eq_key = (safe_optim, safe_lt, safe_tt, song)
+                    safe_fl = str(frame_len_used)
+                    eq_key = (safe_optim, safe_lt, safe_fl, safe_tt, song)
                     if eq_key not in audio_saved_keys:
                         _save_wav(
-                            audio_out_dir / f"EQ_{safe_optim}_{safe_lt}_tt{safe_tt}_{song}.wav",
+                            audio_out_dir / f"EQ_{safe_optim}_{safe_lt}_fl{safe_fl}_tt{safe_tt}_{song}.wav",
                             result["y_control"], sr_audio,
                         )
                         audio_saved_keys.add(eq_key)
@@ -306,6 +312,8 @@ def main() -> None:
         "compute_time_stats": dict(compute_time_stats),
         "tt_transitions":     tt_transitions,
         "input_signals":      sorted(input_ids_used),
+        "unique_frame_lengths": sorted({k[1] for k in curves.keys()}),
+        "frame_size_unit": "samples",
         # checkpoint_examples: {loss_type: {optim_type: [cp, ...]}}
         "checkpoint_examples": {lt: dict(by_optim) for lt, by_optim in checkpoint_examples.items()},
     }
