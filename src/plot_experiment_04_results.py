@@ -55,6 +55,11 @@ def _format_input_label(input_signal) -> str:
     return s
 
 
+def _format_optim_label(optim: str) -> str:
+    """Human-readable optimizer label for plots."""
+    return str(optim).replace("_", " ").replace("GHAM", "iHAM")
+
+
 def _select_series_for_averaging(
     series,
     n_remove_highest_mean_curves: int = 0,
@@ -234,7 +239,7 @@ def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int
                     if key not in curves or not curves[key]:
                         continue
 
-                    legend_label = r"$\mathrm{" + _latex_escape(optim.replace("_", " ")) + r"}$"
+                    legend_label = r"$\mathrm{" + _latex_escape(_format_optim_label(optim)) + r"}$"
                     _plot_mean_std(
                         ax,
                         curves[key],
@@ -335,7 +340,7 @@ def _plot_validation_only_column_true_lem(
     n_cols = 1
 
     # Match the same subplot styling/layout conventions as _plot_dual_scenario_validation.
-    fig = plt.figure(figsize=(2.5 * n_cols + 1.5, 1.5 * n_rows + 0.8))
+    fig = plt.figure(figsize=(3.0 * n_cols + 1.5, 1.5 * n_rows + 0.8))
     gs = fig.add_gridspec(
         n_rows, n_cols + 1,
         width_ratios=[0.22] + [1.0] * n_cols,
@@ -371,9 +376,9 @@ def _plot_validation_only_column_true_lem(
                     continue
 
                 if len(unique_loss_types) > 1:
-                    label = f"{optim.replace('_', ' ')} ({lt})"
+                    label = f"{_format_optim_label(optim)} ({lt})"
                 else:
-                    label = optim.replace("_", " ")
+                    label = _format_optim_label(optim)
 
                 _plot_mean_std(
                     ax,
@@ -617,7 +622,7 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
 
             for optim in optim_types:
                 color = optim_to_color[optim]
-                label = optim.replace("_", " ")
+                label = _format_optim_label(optim)
 
                 val_key  = (tt, optim, lt)
                 loss_key = (tt, optim, lt)
@@ -765,7 +770,7 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_ALL_SONGS_MOVING_POSITION_TRUE_LEM"
+    experiment_name = "experiment_04_ALL_SONGS_MOVING_POSITION"
     n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
 
     # Project root (same convention as experiment_04.py)
