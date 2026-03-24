@@ -5,6 +5,7 @@ from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
+from collections import defaultdict
 
 # Use LaTeX-style mathtext for figure text and numbers
 mpl.rcParams.update(
@@ -140,6 +141,60 @@ def _plot_mean_std(
                 fmt="none", ecolor=color, elinewidth=1.0, capsize=3, alpha=0.7)
 
 
+def _parse_curve_key(key):
+    """Parse legacy/new curve keys into (tt, frame_len, optim, loss)."""
+    if not isinstance(key, tuple):
+        raise ValueError(f"Invalid key type: {type(key)}")
+    if len(key) == 3:
+        tt, optim, loss_type = key
+        frame_len = None
+        return tt, frame_len, optim, loss_type
+    if len(key) == 4:
+        tt, frame_len, optim, loss_type = key
+        return tt, frame_len, optim, loss_type
+    raise ValueError(f"Unsupported curve key format: {key}")
+
+
+def _normalize_curve_dict(curves_raw):
+    """Return normalized map keyed by (tt, frame_len, optim, loss)."""
+    curves_norm = defaultdict(list)
+    for key, series in curves_raw.items():
+        try:
+            tt, frame_len, optim, loss_type = _parse_curve_key(key)
+        except ValueError:
+            continue
+        curves_norm[(tt, frame_len, optim, loss_type)].extend(series)
+    return curves_norm
+
+
+def _group_curves_ignore_frame(curves_norm):
+    """Aggregate normalized curves across frame lengths."""
+    grouped = defaultdict(list)
+    for (tt, _frame_len, optim, loss_type), series in curves_norm.items():
+        grouped[(tt, optim, loss_type)].extend(series)
+    return grouped
+
+
+def _normalize_compute_time_stats(compute_time_stats_raw):
+    """Return compute-time stats keyed by (tt, frame_len, optim)."""
+    out = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
+    for key, stats in compute_time_stats_raw.items():
+        if not isinstance(key, tuple):
+            continue
+        if len(key) == 2:
+            tt, optim = key
+            frame_len = None
+        elif len(key) == 3:
+            tt, frame_len, optim = key
+        else:
+            continue
+        norm_key = (tt, frame_len, optim)
+        out[norm_key]["total_time_s"] += float(stats.get("total_time_s", 0.0))
+        out[norm_key]["total_frames"] += int(stats.get("total_frames", 0))
+        out[norm_key]["num_runs"] += int(stats.get("num_runs", 0))
+    return out
+
+
 def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int = 0) -> None:
     scenario_to_experiment = {
         "Moving listener position (all songs)": "experiment_04_ALL_SONGS_MOVING_POSITION",
@@ -152,7 +207,12 @@ def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int
     for scenario_name, experiment_name in scenario_to_experiment.items():
         try:
             _, plot_data = load_results(experiment_name, root)
-            loaded[scenario_name] = plot_data
+            curves_norm = _normalize_curve_dict(plot_data.get("curves", {}))
+            loaded[scenario_name] = {
+                "curves_grouped": _group_curves_ignore_frame(curves_norm),
+                "tt_transitions": plot_data.get("tt_transitions", {}),
+                "input_signals": plot_data.get("input_signals", None),
+            }
         except FileNotFoundError as exc:
             print(f"Skipping dual-scenario plot: {exc}")
             return
@@ -161,7 +221,7 @@ def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int
         {
             key[0]
             for plot_data in loaded.values()
-            for key in plot_data.get("curves", {}).keys()
+            for key in plot_data.get("curves_grouped", {}).keys()
         }
     )
     if not all_tt:
@@ -173,14 +233,14 @@ def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int
         {
             key[1]
             for plot_data in loaded.values()
-            for key in plot_data.get("curves", {}).keys()
+            for key in plot_data.get("curves_grouped", {}).keys()
         }
     )
     all_loss = sorted(
         {
             key[2]
             for plot_data in loaded.values()
-            for key in plot_data.get("curves", {}).keys()
+            for key in plot_data.get("curves_grouped", {}).keys()
         }
     )
 
@@ -208,7 +268,7 @@ def _plot_dual_scenario_validation(root: Path, n_remove_highest_mean_curves: int
         for col_i, (scenario_name, _) in enumerate(scenario_items):
             ax = axes[row_i, col_i]
             plot_data = loaded[scenario_name]
-            curves = plot_data.get("curves", {})
+            curves = plot_data.get("curves_grouped", {})
             tt_transitions = plot_data.get("tt_transitions", {})
             scenario_input_signals = plot_data.get("input_signals", None)
             run_labels = [
@@ -313,7 +373,8 @@ def _plot_validation_only_column_true_lem(
     n_remove_highest_mean_curves: int = 0,
 ) -> None:
     """Extra figure: one column with validation curves per transition time."""
-    curves = plot1_data.get("curves", {})
+    curves_norm = _normalize_curve_dict(plot1_data.get("curves", {}))
+    curves = _group_curves_ignore_frame(curves_norm)
     tt_transitions = plot1_data.get("tt_transitions", {})
     input_signals = plot1_data.get("input_signals", None)
     run_labels = [_format_input_label(sig) for sig in input_signals] if input_signals else None
@@ -445,16 +506,151 @@ def _plot_validation_only_column_true_lem(
     fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
 
 
+def _plot_frame_size_validation_overlay_grids(
+    cfg: dict,
+    plot1_data: dict,
+    n_remove_highest_mean_curves: int = 0,
+) -> None:
+    """For each transition-time scenario, plot one optimizer-grid with frame-size overlays."""
+    plotting_cfg = cfg.get("plotting", {}) if isinstance(cfg, dict) else {}
+    if plotting_cfg.get("enable_frame_size_analysis_plot", True) is False:
+        return
+
+    curves_norm = _normalize_curve_dict(plot1_data.get("curves", {}))
+    if not curves_norm:
+        print("Skipping frame-size analysis plot: no validation curves available.")
+        return
+
+    tt_transitions = plot1_data.get("tt_transitions", {})
+    input_signals = plot1_data.get("input_signals", None)
+    run_labels = [_format_input_label(sig) for sig in input_signals] if input_signals else None
+
+    unique_tt = sorted({k[0] for k in curves_norm.keys()})
+    unique_loss_types = sorted({k[3] for k in curves_norm.keys()})
+    optim_types = sorted({k[2] for k in curves_norm.keys()})
+    frame_lengths = sorted({k[1] for k in curves_norm.keys() if k[1] is not None})
+
+    if len(frame_lengths) <= 1:
+        return
+
+    frame_linestyles = ["-", "--", "-.", ":"]
+    frame_to_ls = {fl: frame_linestyles[i % len(frame_linestyles)] for i, fl in enumerate(frame_lengths)}
+    color_map = plt.get_cmap("tab10")
+    optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
+
+    for tt in unique_tt:
+        n_rows = len(unique_loss_types)
+        n_cols = max(1, len(optim_types))
+
+        fig, axes = plt.subplots(
+            n_rows,
+            n_cols,
+            figsize=(2.5 * n_cols + 1.0, 1.6 * n_rows + 0.8),
+            squeeze=False,
+        )
+
+        for row_i, lt in enumerate(unique_loss_types):
+            for col_i, optim in enumerate(optim_types):
+                ax = axes[row_i, col_i]
+
+                if row_i == 0:
+                    ax.set_title(r"$\mathrm{" + _latex_escape(str(optim).replace("_", " ")) + r"}$")
+
+                ax.axhline(y=1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
+
+                trans = tt_transitions.get(tt, None)
+                if trans is not None:
+                    for t_start, t_end in trans:
+                        ax.axvline(x=t_start, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                        if t_start != t_end:
+                            ax.axvline(x=t_end, color="0.2", linestyle="--", linewidth=1.0, alpha=0.9)
+                            ax.axvspan(t_start, t_end, color="0.8", alpha=0.3)
+
+                for fl in frame_lengths:
+                    key = (tt, fl, optim, lt)
+                    if key not in curves_norm or not curves_norm[key]:
+                        continue
+                    _plot_mean_std(
+                        ax,
+                        curves_norm[key],
+                        color=optim_to_color[optim],
+                        linestyle=frame_to_ls[fl],
+                        label=f"FL={fl}",
+                        n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+                        run_labels=run_labels,
+                        report_context=f"frame-size grid | tt={tt}, optim={optim}, loss={lt}, fl={fl}",
+                    )
+
+                ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.7)
+                if lt == "TD-MSE":
+                    ax.set_ylim(-0.2, 3.5)
+                else:
+                    ax.set_ylim(-0.2, 1.5)
+                ax.set_yticks([0, 1])
+                ax.set_yticklabels(["0", "1"])
+
+                is_left_col = (col_i == 0)
+                is_bottom_row = (row_i == n_rows - 1)
+                ax.tick_params(
+                    axis="x",
+                    which="both",
+                    bottom=is_bottom_row,
+                    labelbottom=is_bottom_row,
+                    top=False,
+                    labeltop=False,
+                )
+                ax.tick_params(
+                    axis="y",
+                    which="both",
+                    left=is_left_col,
+                    labelleft=is_left_col,
+                    right=False,
+                    labelright=False,
+                )
+
+                if is_left_col:
+                    ax.set_ylabel(r"$\mathrm{" + _latex_escape(str(lt)) + r"}$")
+                if is_bottom_row:
+                    ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
+
+        # One legend per figure (frame-length mapping).
+        handles, labels = axes[0, 0].get_legend_handles_labels()
+        if handles:
+            unique_h, unique_l = [], []
+            for h, l in zip(handles, labels):
+                if l in unique_l:
+                    continue
+                unique_h.append(h)
+                unique_l.append(l)
+            axes[0, 0].legend(
+                unique_h,
+                unique_l,
+                loc="upper right",
+                fontsize=7,
+                frameon=True,
+                borderpad=0.2,
+                labelspacing=0.2,
+                handlelength=1.2,
+                handletextpad=0.3,
+                columnspacing=0.6,
+                borderaxespad=0.2,
+            )
+
+        fig.suptitle(f"Transition time = {tt} s | Frame-size validation analysis", fontsize=11)
+        fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
+
+
 def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int = 0) -> None:
-    curves = plot1_data["curves"]
-    loss_curves = plot1_data.get("loss_curves", {})
-    compute_time_stats = plot1_data.get("compute_time_stats", {})
+    curves_norm = _normalize_curve_dict(plot1_data["curves"])
+    loss_curves_norm = _normalize_curve_dict(plot1_data.get("loss_curves", {}))
+    curves = _group_curves_ignore_frame(curves_norm)
+    loss_curves = _group_curves_ignore_frame(loss_curves_norm)
+    compute_time_stats_norm = _normalize_compute_time_stats(plot1_data.get("compute_time_stats", {}))
     tt_transitions = plot1_data.get("tt_transitions", {})
     input_signals = plot1_data.get("input_signals", None)
     checkpoint_examples = plot1_data.get("checkpoint_examples", {})
 
-    # curves keys are (transition_time_s, optim_type)
-    # Derive dimensions from 3-tuple keys: (transition_time_s, optim_type, loss_type)
+    # Derive dimensions from normalized grouped keys: (transition_time_s, optim_type, loss_type)
     all_curve_keys = list(curves.keys())
     if not all_curve_keys:
         print("No curves found in plot data.")
@@ -487,15 +683,18 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
     # Compute-time table: rows = transition_time_s, cols = optimizer
     # Each cell reports average compute time per frame [s/frame]
     # ------------------------------------------------------------------
-    if compute_time_stats:
+    if compute_time_stats_norm:
         compute_time_table = np.full((len(unique_tt), len(optim_types)), np.nan, dtype=float)
         for tt_i, tt in enumerate(unique_tt):
             for opt_i, opt in enumerate(optim_types):
-                stats = compute_time_stats.get((tt, opt), None)
-                if not stats:
+                matching_stats = [
+                    v for (tt_k, _fl_k, opt_k), v in compute_time_stats_norm.items()
+                    if tt_k == tt and opt_k == opt
+                ]
+                if not matching_stats:
                     continue
-                total_frames = int(stats.get("total_frames", 0))
-                total_time_s = float(stats.get("total_time_s", 0.0))
+                total_frames = int(sum(s.get("total_frames", 0) for s in matching_stats))
+                total_time_s = float(sum(s.get("total_time_s", 0.0) for s in matching_stats))
                 if total_frames > 0:
                     compute_time_table[tt_i, opt_i] = total_time_s / total_frames
 
@@ -765,7 +964,7 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_ALL_SONGS_MOVING_POSITION_TRUE_LEM"
+    experiment_name = "experiment_04_FRAME_SIZE_ANALYSIS"
     n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
 
     # Project root (same convention as experiment_04.py)
@@ -785,6 +984,17 @@ def main() -> None:
 
     if experiment_name == "experiment_04_ALL_SONGS_MOVING_POSITION_TRUE_LEM":
         _plot_validation_only_column_true_lem(
+            cfg,
+            plot1_data,
+            n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+        )
+
+    frame_lengths_meta = plot1_data.get("unique_frame_lengths", None)
+    if frame_lengths_meta is None:
+        curves_norm = _normalize_curve_dict(plot1_data.get("curves", {}))
+        frame_lengths_meta = sorted({k[1] for k in curves_norm.keys() if k[1] is not None})
+    if len(frame_lengths_meta) > 1:
+        _plot_frame_size_validation_overlay_grids(
             cfg,
             plot1_data,
             n_remove_highest_mean_curves=n_remove_highest_mean_curves,
