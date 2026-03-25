@@ -548,7 +548,7 @@ def _plot_frame_size_validation_overlay_grids(
         fig, axes = plt.subplots(
             n_rows,
             n_cols,
-            figsize=(2.5 * n_cols + 1.0, 1.6 * n_rows + 0.8),
+            figsize=(1.0 * (2.0 * n_cols + 1.0), 1.0 * (1.3 * n_rows + 0.8)),
             squeeze=False,
         )
 
@@ -557,7 +557,7 @@ def _plot_frame_size_validation_overlay_grids(
                 ax = axes[row_i, col_i]
 
                 if row_i == 0:
-                    ax.set_title(r"$\mathrm{" + _latex_escape(str(optim).replace("_", " ")) + r"}$")
+                    ax.set_title(r"$\mathrm{" + _latex_escape(_format_optim_label(optim)) + r"}$")
 
                 ax.axhline(y=1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.6)
 
@@ -612,7 +612,10 @@ def _plot_frame_size_validation_overlay_grids(
                 )
 
                 if is_left_col:
-                    ax.set_ylabel(r"$\mathrm{" + _latex_escape(str(lt)) + r"}$")
+                    if lt == "FD-MSE":
+                        ax.set_ylabel(r"$D_{\text{rel}}$")
+                    else:
+                        ax.set_ylabel(r"$\mathrm{" + _latex_escape(str(lt)) + r"}$")
                 if is_bottom_row:
                     ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
 
@@ -639,7 +642,6 @@ def _plot_frame_size_validation_overlay_grids(
                 borderaxespad=0.2,
             )
 
-        fig.suptitle(f"Transition time = {tt} s | Frame-size validation analysis", fontsize=11)
         fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
 
 
