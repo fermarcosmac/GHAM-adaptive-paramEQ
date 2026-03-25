@@ -40,8 +40,8 @@ mpl.rcParams.update(
 # -----------------------------------------------------------------------------
 EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
-WINDOW_SECONDS = 150.0  # no-overlap sliding window length
-EVAL_LAST_S = 150.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
+WINDOW_SECONDS = 180.0  # no-overlap sliding window length
+EVAL_LAST_S = 0.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
 REFERENCE_DELAY_SAMPLES = 300  # delay applied to reference before metric windowing
 MAX_PLOTTED_ERRORBARS = 12
 SHOW_TQDM_PROGRESS = True
