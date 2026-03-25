@@ -538,10 +538,8 @@ def _plot_frame_size_validation_overlay_grids(
     if len(frame_lengths) <= 1:
         return
 
-    frame_linestyles = ["-", "--", "-.", ":"]
-    frame_to_ls = {fl: frame_linestyles[i % len(frame_linestyles)] for i, fl in enumerate(frame_lengths)}
-    color_map = plt.get_cmap("tab10")
-    optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
+    frame_color_map = plt.get_cmap("tab10")
+    frame_to_color = {fl: frame_color_map(i % 10) for i, fl in enumerate(frame_lengths)}
 
     for tt in unique_tt:
         n_rows = len(unique_loss_types)
@@ -578,8 +576,8 @@ def _plot_frame_size_validation_overlay_grids(
                     _plot_mean_std(
                         ax,
                         curves_norm[key],
-                        color=optim_to_color[optim],
-                        linestyle=frame_to_ls[fl],
+                        color=frame_to_color[fl],
+                        linestyle="-",
                         label=f"FL={fl}",
                         n_remove_highest_mean_curves=n_remove_highest_mean_curves,
                         run_labels=run_labels,

@@ -41,8 +41,10 @@ mpl.rcParams.update(
 EXPERIMENT_NAME = "experiment_04_ALL_SONGS_MOVING_POSITION"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
 WINDOW_SECONDS = 180.0  # no-overlap sliding window length
-EVAL_LAST_S = 0.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
+EVAL_LAST_S = 150.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
 REFERENCE_DELAY_SAMPLES = 300  # delay applied to reference before metric windowing
+DITHER_STD = 1e-8  # std of shared white-noise dither added to both compared signals
+DITHER_SEED = 12345
 MAX_PLOTTED_ERRORBARS = 12
 SHOW_TQDM_PROGRESS = True
 SUPPRESS_INTERNAL_METRIC_PRINTS = True
@@ -85,6 +87,26 @@ def apply_sample_delay(x: np.ndarray, delay_samples: int) -> np.ndarray:
     return y
 
 
+def add_shared_dither(
+    reference: np.ndarray,
+    degraded: np.ndarray,
+    std: float = DITHER_STD,
+    seed: int = DITHER_SEED,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Add the same low-level white noise to both signals (after delay handling)."""
+    n = min(reference.shape[0], degraded.shape[0])
+    if n <= 0:
+        return reference[:0], degraded[:0]
+    if std <= 0.0:
+        return reference[:n], degraded[:n]
+
+    ref_n = np.asarray(reference[:n], dtype=np.float32)
+    deg_n = np.asarray(degraded[:n], dtype=np.float32)
+    rng = np.random.default_rng(seed)
+    noise = rng.normal(0.0, std, size=n).astype(np.float32)
+    return ref_n + noise, deg_n + noise
+
+
 def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float:
     #return 0.0
     n = min(reference.shape[0], degraded.shape[0])
@@ -105,9 +127,10 @@ def metric_peaq(reference: np.ndarray, degraded: np.ndarray, sf: float) -> float
     try:
         result = peaq_process_files(str(ref_path), str(deg_path))
         avg_ODG = np.mean(result["ODG_list"])
-        return avg_ODG
-    except:
-        return float(-4.0) # TODO Worst ODG fallback See why this is failing
+        return float(avg_ODG)
+    except Exception as e:
+        print(f"Error occurred while processing PEAQ: {e}")
+        return float(-4.0)  # TODO Worst ODG fallback See why this is failing
     finally:
         for p in (ref_path, deg_path):
             try:
@@ -462,17 +485,22 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
         for song in songs:
             desired, sr_ref = load_audio_mono(parsed.desired[song])
             noeq, sr_noeq = load_audio_mono(parsed.noeq[song])
+            #noeq = noeq[REFERENCE_DELAY_SAMPLES:]
             if sr_ref != sr_noeq:
                 raise RuntimeError(
                     f"Sample-rate mismatch for song {song}: desired={sr_ref}, noEQ={sr_noeq}"
                 )
 
             desired_delayed = apply_sample_delay(desired, REFERENCE_DELAY_SAMPLES)
+            desired_noeq, noeq_noisy = add_shared_dither(
+                desired_delayed,
+                noeq,
+            )
 
             for metric_name, metric_fn in METRICS.items():
                 noeq_metrics[metric_name][song] = compute_windowed_metric(
-                    reference=desired_delayed,
-                    degraded=noeq,
+                    reference=desired_noeq,
+                    degraded=noeq_noisy,
                     sr=sr_ref,
                     window_seconds=WINDOW_SECONDS,
                     metric_fn=metric_fn,
@@ -493,16 +521,22 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
                     continue
 
                 eq_audio, sr_eq = load_audio_mono(eq_path)
+                #eq_audio = eq_audio[REFERENCE_DELAY_SAMPLES:]
                 if sr_eq != sr_ref:
                     raise RuntimeError(
                         f"Sample-rate mismatch for song {song}, condition {cond}: "
                         f"desired={sr_ref}, EQ={sr_eq}"
                     )
 
+                desired_eq, eq_noisy = add_shared_dither(
+                    desired_delayed,
+                    eq_audio,
+                )
+
                 for metric_name, metric_fn in METRICS.items():
                     eq_metrics[metric_name][(cond, song)] = compute_windowed_metric(
-                        reference=desired_delayed,
-                        degraded=eq_audio,
+                        reference=desired_eq,
+                        degraded=eq_noisy,
                         sr=sr_ref,
                         window_seconds=WINDOW_SECONDS,
                         metric_fn=metric_fn,
