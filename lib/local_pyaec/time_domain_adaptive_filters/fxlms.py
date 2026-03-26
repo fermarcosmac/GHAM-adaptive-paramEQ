@@ -17,7 +17,7 @@
 
 import numpy as np
 
-def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None):
+def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None, u_state = None, u_f_state = None, x_state = None):
   x = np.asarray(x, dtype=float)
   d = np.asarray(d, dtype=float)
   h_hat = np.asarray(h_hat, dtype=float)
@@ -37,15 +37,16 @@ def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None):
     return np.zeros(0)
 
   # Regressor for control filter output y[n] = w^T u[n].
-  u = np.zeros(N)
+  u = np.zeros(N) if u_state is None else u_state
   # Regressor built from filtered-x signal x_f[n] = (h_hat * x)[n].
-  u_f = np.zeros(N)
+  u_f = np.zeros(N) if u_f_state is None else u_f_state
   # State for online FIR filtering by h_hat.
-  x_state = np.zeros(h_hat.size)
+  x_state = np.zeros(h_hat.size) if x_state is None else x_state
 
   e = np.zeros(nIters)
 
   for n in range(nIters):
+    # u and x_state are both buffers for input, but with different lengths (possibly different memoried of direct path and controller filter)
     # Raw reference vector for control output.
     u[1:] = u[:-1]
     u[0] = x[n]
@@ -53,15 +54,14 @@ def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None):
     # Compute filtered-x sample with estimated secondary path.
     x_state[1:] = x_state[:-1]
     x_state[0] = x[n]
-    x_f_n = np.dot(h_hat, x_state)
 
     # Filtered reference vector used in gradient update.
     u_f[1:] = u_f[:-1]
-    u_f[0] = x_f_n
+    u_f[0] = np.dot(h_hat, x_state)
 
     y_n = np.dot(w, u)
     e_n = d[n] - y_n
     w = w + mu * e_n * u_f
     e[n] = e_n
 
-  return e, w # Return error progress and final control filter coefficients.
+  return e, w, u_state, u_f_state, x_state # Return error progress, final control filter coefficients and state variables.
