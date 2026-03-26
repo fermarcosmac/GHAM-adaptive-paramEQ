@@ -222,6 +222,7 @@ def plot_results(experiment_name: str) -> None:
     ax_resp.set_xscale("log")
     ax_resp.set_xlim(20, 24000)
     ax_resp.set_xlabel("Frequency [Hz]")
+    ax_resp.set_ylim(-40, 20)
     ax_resp.set_ylabel("Magnitude [dB]")
     ax_resp.set_title("Desired vs Final Equalized Response")
     ax_resp.grid(True, linestyle=":", linewidth=0.6, alpha=0.8)

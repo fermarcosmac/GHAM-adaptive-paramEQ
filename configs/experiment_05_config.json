@@ -26,13 +26,13 @@
   ],
   "fir_baselines": {
     "FxLMS": {
-      "enabled": false,
+      "enabled": true,
       "mu": 0.0005,
-      "filter_len": 256
+      "filter_len": 1024
     },
     "FxFDAF": {
       "enabled": true,
-      "mu": 0.01,
+      "mu": 0.05,
       "beta": 0.95,
       "filter_len": 1024
     }
@@ -41,6 +41,6 @@
     "use_white_noise": true,
     "use_songs_folder": false,
     "max_num_songs": 1,
-    "max_audio_len_s": [120.0]
+    "max_audio_len_s": [60.0]
   }
 }

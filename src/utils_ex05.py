@@ -189,18 +189,18 @@ def _fxlms_frame(
     mu: float,
     u_state: np.ndarray,
     u_f_state: np.ndarray,
-    x_hat_state: np.ndarray,
+    x_state: np.ndarray,
     sec_state: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Wrapper around local_pyaec FxLMS for one frame-sized block."""
     # I think compensator filter is being reinitialized after each call.
     # Why does error not decrease over time?
     # TODO: debug!
-    e, w_new = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu, w_init = w)
+    e, w_new, u_state, u_f_state, x_state = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu, w_init = w, u_state=u_state, u_f_state=u_f_state, x_state=x_state)
     y_out = d_block - e
     # local_pyaec fxlms does not expose control output directly; use y_out for logging.
     y_ctrl = y_out.copy()
-    return e, y_ctrl, y_out, w_new, u_state, u_f_state, x_hat_state
+    return e, y_ctrl, y_out, w_new, u_state, u_f_state, x_state
 
 
 def _fxfdaf_frame(
@@ -260,14 +260,16 @@ def run_fir_baseline_experiment(
     n_ctrl = int(algo_cfg.get("filter_len", frame_len))
     n_ctrl = max(8, min(n_ctrl, frame_len * 2))
 
+    # TODO: estimate h_hat from input/output data
     h_hat = np.asarray(rir_ctx["rirs"][0], dtype=np.float64)
+    h_hat = h_hat[:4096] # TODO: hardcoded!
     if h_hat.ndim != 1:
         h_hat = h_hat.reshape(-1)
 
     w = np.zeros(n_ctrl, dtype=np.float64) # control filter coefficients
     u_state = np.zeros(n_ctrl, dtype=np.float64)
     u_f_state = np.zeros(n_ctrl, dtype=np.float64)
-    x_hat_state = np.zeros(len(h_hat), dtype=np.float64)
+    x_state = np.zeros(len(h_hat), dtype=np.float64)
     sec_state = np.zeros(len(rir_ctx["rirs"][0]), dtype=np.float64)
 
     n_frames = (len(x) - frame_len) // hop_len + 1
@@ -294,8 +296,9 @@ def run_fir_baseline_experiment(
         x_fr = x[start:stop]
         d_fr = d_full[start:stop]
 
+        # TODO: within fxlms, pass and return state buffers to main logic!
         if algorithm == "FxLMS":
-            e_fr, y_ctrl_fr, y_out_fr, w, u_state, u_f_state, x_hat_state = _fxlms_frame(
+            e_fr, y_ctrl_fr, y_out_fr, w, u_state, u_f_state, x_state = _fxlms_frame(
                 x_fr,
                 d_fr,
                 lem_ir,
@@ -304,7 +307,7 @@ def run_fir_baseline_experiment(
                 mu,
                 u_state,
                 u_f_state,
-                x_hat_state,
+                x_state,
                 sec_state,
             )
         elif algorithm == "FxFDAF":

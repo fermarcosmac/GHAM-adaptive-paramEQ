@@ -63,11 +63,11 @@ def _estimate_final_equalized_response(
 	if n < 8:
 		return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
 
-	win_len = min(n, max(8 * int(frame_len), 4096))
+	win_len = min(n, int(frame_len))
 	x_seg = x[n - win_len : n]
 	y_seg = y[n - win_len : n]
 
-	window = np.hanning(win_len)
+	window = np.ones(win_len)
 	xw = x_seg * window
 	yw = y_seg * window
 
