@@ -50,7 +50,7 @@ def _song_stem(input_spec) -> str:
 def main() -> None:
 
     # Load configuration
-    config_path = root / "configs" / "experiment_04_config.json"
+    config_path = root / "configs" / "experiment_04_config_debug.json"
     cfg = load_config(config_path)
 
     # Global seeding for reproducibility (EQ init, white noise, song sampling)
@@ -144,7 +144,15 @@ def main() -> None:
     # -----------------------------------------------------------------------
     curves = defaultdict(list)        # (tt, frame_len, optim, lt) -> [(time_axis, val_hist), ...]
     loss_curves = defaultdict(list)   # (tt, frame_len, optim, lt) -> [(time_axis, loss_hist), ...]
-    compute_time_stats = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
+    compute_time_stats = defaultdict(
+        lambda: {
+            "total_time_s": 0.0,
+            "total_frames": 0,
+            "num_runs": 0,
+            "min_avg_time_per_frame_s": float("inf"),
+            "max_avg_time_per_frame_s": float("-inf"),
+        }
+    )
     tt_transitions = {}               # tt -> list of (start_s, end_s)
     input_ids_used = set()
     checkpoint_examples = defaultdict(dict)  # lt -> {optim: [cp, ...]}
@@ -262,6 +270,16 @@ def main() -> None:
                 compute_time_stats[ct_key]["total_time_s"] += total_time_s
                 compute_time_stats[ct_key]["total_frames"] += n_frames
                 compute_time_stats[ct_key]["num_runs"] += 1
+                if n_frames > 0:
+                    avg_time_per_frame_s = total_time_s / n_frames
+                    compute_time_stats[ct_key]["min_avg_time_per_frame_s"] = min(
+                        float(compute_time_stats[ct_key]["min_avg_time_per_frame_s"]),
+                        float(avg_time_per_frame_s),
+                    )
+                    compute_time_stats[ct_key]["max_avg_time_per_frame_s"] = max(
+                        float(compute_time_stats[ct_key]["max_avg_time_per_frame_s"]),
+                        float(avg_time_per_frame_s),
+                    )
 
                 if tt not in tt_transitions:
                     tt_transitions[tt] = result.get("transition_times", None)

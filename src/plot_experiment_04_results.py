@@ -182,7 +182,15 @@ def _group_curves_ignore_frame(curves_norm):
 
 def _normalize_compute_time_stats(compute_time_stats_raw):
     """Return compute-time stats keyed by (tt, frame_len, optim)."""
-    out = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
+    out = defaultdict(
+        lambda: {
+            "total_time_s": 0.0,
+            "total_frames": 0,
+            "num_runs": 0,
+            "min_avg_time_per_frame_s": float("inf"),
+            "max_avg_time_per_frame_s": float("-inf"),
+        }
+    )
     for key, stats in compute_time_stats_raw.items():
         if not isinstance(key, tuple):
             continue
@@ -197,6 +205,14 @@ def _normalize_compute_time_stats(compute_time_stats_raw):
         out[norm_key]["total_time_s"] += float(stats.get("total_time_s", 0.0))
         out[norm_key]["total_frames"] += int(stats.get("total_frames", 0))
         out[norm_key]["num_runs"] += int(stats.get("num_runs", 0))
+        out[norm_key]["min_avg_time_per_frame_s"] = min(
+            float(out[norm_key]["min_avg_time_per_frame_s"]),
+            float(stats.get("min_avg_time_per_frame_s", float("inf"))),
+        )
+        out[norm_key]["max_avg_time_per_frame_s"] = max(
+            float(out[norm_key]["max_avg_time_per_frame_s"]),
+            float(stats.get("max_avg_time_per_frame_s", float("-inf"))),
+        )
     return out
 
 
@@ -690,6 +706,8 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
     # ------------------------------------------------------------------
     if compute_time_stats_norm:
         compute_time_table = np.full((len(unique_tt), len(optim_types)), np.nan, dtype=float)
+        compute_time_min_table = np.full((len(unique_tt), len(optim_types)), np.nan, dtype=float)
+        compute_time_max_table = np.full((len(unique_tt), len(optim_types)), np.nan, dtype=float)
         for tt_i, tt in enumerate(unique_tt):
             for opt_i, opt in enumerate(optim_types):
                 matching_stats = [
@@ -702,15 +720,28 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
                 total_time_s = float(sum(s.get("total_time_s", 0.0) for s in matching_stats))
                 if total_frames > 0:
                     compute_time_table[tt_i, opt_i] = total_time_s / total_frames
+                min_vals = [float(s.get("min_avg_time_per_frame_s", float("inf"))) for s in matching_stats]
+                max_vals = [float(s.get("max_avg_time_per_frame_s", float("-inf"))) for s in matching_stats]
+                min_vals = [v for v in min_vals if np.isfinite(v)]
+                max_vals = [v for v in max_vals if np.isfinite(v)]
+                if min_vals:
+                    compute_time_min_table[tt_i, opt_i] = float(min(min_vals))
+                if max_vals:
+                    compute_time_max_table[tt_i, opt_i] = float(max(max_vals))
 
-        print("Average compute time per frame [s/frame] (rows=transition_time_s, cols=optimizer):")
+        print("Compute time per frame [s/frame] as avg [min, max] (rows=transition_time_s, cols=optimizer):")
         header = "transition_time_s" + "".join(f"\t{opt}" for opt in optim_types)
         print(header)
         for tt_i, tt in enumerate(unique_tt):
             row_vals = []
             for opt_i in range(len(optim_types)):
-                v = compute_time_table[tt_i, opt_i]
-                row_vals.append(f"{v:.6f}" if np.isfinite(v) else "nan")
+                v_avg = compute_time_table[tt_i, opt_i]
+                v_min = compute_time_min_table[tt_i, opt_i]
+                v_max = compute_time_max_table[tt_i, opt_i]
+                if np.isfinite(v_avg) and np.isfinite(v_min) and np.isfinite(v_max):
+                    row_vals.append(f"{v_avg:.6f} [{v_min:.6f}, {v_max:.6f}]")
+                else:
+                    row_vals.append("nan")
             print(f"{tt}\t" + "\t".join(row_vals))
         print()
 
@@ -719,10 +750,18 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
             figsize=(max(6.0, 1.2 * len(optim_types) + 2.0), max(2.5, 0.6 * len(unique_tt) + 1.8))
         )
         ax_time.axis("off")
-        table_cell_text = [
-            [f"{v:.6f}" if np.isfinite(v) else "-" for v in row]
-            for row in compute_time_table
-        ]
+        table_cell_text = []
+        for tt_i in range(len(unique_tt)):
+            row = []
+            for opt_i in range(len(optim_types)):
+                v_avg = compute_time_table[tt_i, opt_i]
+                v_min = compute_time_min_table[tt_i, opt_i]
+                v_max = compute_time_max_table[tt_i, opt_i]
+                if np.isfinite(v_avg) and np.isfinite(v_min) and np.isfinite(v_max):
+                    row.append(f"{v_avg:.6f}\n[{v_min:.6f}, {v_max:.6f}]")
+                else:
+                    row.append("-")
+            table_cell_text.append(row)
         table_row_labels = [f"tt={tt}s" for tt in unique_tt]
         timing_table = ax_time.table(
             cellText=table_cell_text,
@@ -734,7 +773,7 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
         timing_table.auto_set_font_size(False)
         timing_table.set_fontsize(8)
         timing_table.scale(1.0, 1.2)
-        ax_time.set_title("Average compute time per frame [s/frame]")
+        ax_time.set_title("Compute time per frame [s/frame]: avg [min, max]")
         fig_time.tight_layout()
 
     # ------------------------------------------------------------------
@@ -969,7 +1008,7 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_FRAME_SIZE_ANALYSIS"
+    experiment_name = "experiment_04_DEBUG"
     n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
 
     # Project root (same convention as experiment_04.py)
