@@ -17,7 +17,7 @@
 
 import numpy as np
 
-def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None, u_state = None, u_f_state = None, x_state = None):
+def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None, u_state = None, u_f_state = None, x_state = None, y_state = None):
   x = np.asarray(x, dtype=float)
   d = np.asarray(d, dtype=float)
   h_hat = np.asarray(h_hat, dtype=float)
@@ -34,7 +34,7 @@ def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None, u_state = None
 
   nIters = min(len(x), len(d))
   if nIters <= 0:
-    return np.zeros(0)
+    return np.zeros(0), w, u_state, u_f_state, x_state, y_state
 
   # Regressor for control filter output y[n] = w^T u[n].
   u = np.zeros(N) if u_state is None else u_state
@@ -42,6 +42,8 @@ def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None, u_state = None
   u_f = np.zeros(N) if u_f_state is None else u_f_state
   # State for online FIR filtering by h_hat.
   x_state = np.zeros(h_hat.size) if x_state is None else x_state
+  # State for online FIR filtering of controller output through h_hat.
+  y_state = np.zeros(h_hat.size) if y_state is None else y_state
 
   e = np.zeros(nIters)
 
@@ -60,8 +62,14 @@ def fxlms(x, d, h_hat, N = 4, mu = 0.1, w_init:np.ndarray = None, u_state = None
     u_f[0] = np.dot(h_hat, x_state)
 
     y_n = np.dot(w, u)
-    e_n = d[n] - y_n
+
+    # Compute anti-noise at the error microphone after secondary path.
+    y_state[1:] = y_state[:-1]
+    y_state[0] = y_n
+    y_sec_n = np.dot(h_hat, y_state)
+
+    e_n = d[n] - y_sec_n
     w = w + mu * e_n * u_f
     e[n] = e_n
 
-  return e, w, u_state, u_f_state, x_state # Return error progress, final control filter coefficients and state variables.
+  return e, w, u, u_f, x_state, y_state # Return error progress, final control filter coefficients and state variables.

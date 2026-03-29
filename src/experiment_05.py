@@ -219,8 +219,23 @@ def main() -> None:
 
 				key = (fir_result["transition_time_s"], algo_name)
 				t_axis = np.asarray(fir_result["time_axis"], dtype=np.float64)
-				td_curve = np.asarray(fir_result["td_mse_history"], dtype=np.float64)
+				td_curve = _framewise_mse(
+					np.asarray(fir_result.get("desired_audio", []), dtype=np.float64),
+					np.asarray(fir_result.get("y_control", []), dtype=np.float64),
+					frame_len=frame_len,
+					hop_len=hop_len,
+				)
 				v_curve = np.asarray(fir_result["validation_error_history"], dtype=np.float64)
+
+				if td_curve.size and t_axis.size:
+					min_len = min(len(td_curve), len(t_axis))
+					td_curve = td_curve[:min_len]
+					t_axis = t_axis[:min_len]
+
+				if t_axis.size and v_curve.size:
+					min_len = min(len(t_axis), len(v_curve))
+					t_axis = t_axis[:min_len]
+					v_curve = v_curve[:min_len]
 
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))

@@ -191,16 +191,23 @@ def _fxlms_frame(
     u_f_state: np.ndarray,
     x_state: np.ndarray,
     sec_state: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Wrapper around local_pyaec FxLMS for one frame-sized block."""
-    # I think compensator filter is being reinitialized after each call.
-    # Why does error not decrease over time?
-    # TODO: debug!
-    e, w_new, u_state, u_f_state, x_state = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu, w_init = w, u_state=u_state, u_f_state=u_f_state, x_state=x_state)
+    e, w_new, u_state, u_f_state, x_state, sec_state = lib_fxlms.fxlms(
+        x_block,
+        d_block,
+        h_hat=h_hat,
+        N=len(w),
+        mu=mu,
+        w_init=w,
+        u_state=u_state,
+        u_f_state=u_f_state,
+        x_state=x_state,
+        y_state=sec_state,
+    )
     y_out = d_block - e
-    # local_pyaec fxlms does not expose control output directly; use y_out for logging.
     y_ctrl = y_out.copy()
-    return e, y_ctrl, y_out, w_new, u_state, u_f_state, x_state
+    return e, y_ctrl, y_out, w_new, u_state, u_f_state, x_state, sec_state
 
 
 def _fxfdaf_frame(
@@ -208,18 +215,44 @@ def _fxfdaf_frame(
     d_block: np.ndarray,
     h_hat: np.ndarray,
     w: np.ndarray,
+    x_state: np.ndarray,
     mu: float,
     beta: float,
     block_size: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Wrapper around local_pyaec FxFDAF for one frame-sized block."""
-    W = fft(w,n=block_size+1)
-    e, W_new = lib_fxfdaf.fxfdaf(x_block, d_block, h_hat=h_hat, M=block_size, mu=mu, beta=beta, W_init=W)
-    w_new = ifft(W_new, n=block_size+1)
+    m = int(block_size)
+    n = min(len(x_block), len(d_block))
+    if m <= 0:
+        raise ValueError("FxFDAF block_size must be > 0")
+    if n < m or (n % m) != 0:
+        # local_pyaec.fxfdaf processes floor(n/M) full blocks only.
+        # Fallback to a single full-frame block to avoid tail-length shape mismatches.
+        m = n
+
+    W = fft(w, n=m + 1)
+    e, W_new, x_state = lib_fxfdaf.fxfdaf(
+        x_block,
+        d_block,
+        h_hat=h_hat,
+        M=m,
+        mu=mu,
+        beta=beta,
+        W_init=W,
+        x_state=x_state,
+    )
+    w_new = ifft(W_new, n=m + 1)[:m]
+
+    # Ensure error vector matches current frame length for stable downstream bookkeeping.
+    if len(e) != len(d_block):
+        e_aligned = np.zeros(len(d_block), dtype=np.float64)
+        c = min(len(e), len(d_block))
+        e_aligned[:c] = np.asarray(e[:c], dtype=np.float64)
+        e = e_aligned
 
     y_out = d_block - e
     y_ctrl = y_out.copy()
-    return e, y_ctrl, y_out, w_new
+    return e, y_ctrl, y_out, w_new, x_state
 
 def run_fir_baseline_experiment(
     sim_cfg: Dict[str, Any],
@@ -259,18 +292,26 @@ def run_fir_baseline_experiment(
     beta = float(algo_cfg.get("beta", 0.9))
     n_ctrl = int(algo_cfg.get("filter_len", frame_len))
     n_ctrl = max(8, min(n_ctrl, frame_len * 2))
+    fdaf_block_size = int(algo_cfg.get("block_size", n_ctrl))
+    fdaf_block_size = max(8, min(fdaf_block_size, frame_len))
 
     # TODO: estimate h_hat from input/output data
     h_hat = np.asarray(rir_ctx["rirs"][0], dtype=np.float64)
     h_hat = h_hat[:4096] # TODO: hardcoded!
-    if h_hat.ndim != 1:
-        h_hat = h_hat.reshape(-1)
+    # max_h_hat_len = int(algo_cfg.get("h_hat_len", 0))
+    # if max_h_hat_len > 0:
+    #     h_hat = h_hat[:max_h_hat_len]
+    # if h_hat.ndim != 1:
+    #     h_hat = h_hat.reshape(-1)
 
+    # Initialize control filter and state buffers for adaptive algorithm.
     w = np.zeros(n_ctrl, dtype=np.float64) # control filter coefficients
     u_state = np.zeros(n_ctrl, dtype=np.float64)
     u_f_state = np.zeros(n_ctrl, dtype=np.float64)
     x_state = np.zeros(len(h_hat), dtype=np.float64)
-    sec_state = np.zeros(len(rir_ctx["rirs"][0]), dtype=np.float64)
+    sec_state = np.zeros(len(h_hat), dtype=np.float64)
+
+    x_state_fdaf = None # separate state for FxFDAF since it processes blocks instead of samples
 
     n_frames = (len(x) - frame_len) // hop_len + 1
     td_mse_history: List[float] = []
@@ -296,9 +337,8 @@ def run_fir_baseline_experiment(
         x_fr = x[start:stop]
         d_fr = d_full[start:stop]
 
-        # TODO: within fxlms, pass and return state buffers to main logic!
         if algorithm == "FxLMS":
-            e_fr, y_ctrl_fr, y_out_fr, w, u_state, u_f_state, x_state = _fxlms_frame(
+            e_fr, y_ctrl_fr, y_out_fr, w, u_state, u_f_state, x_state, sec_state = _fxlms_frame(
                 x_fr,
                 d_fr,
                 lem_ir,
@@ -311,17 +351,18 @@ def run_fir_baseline_experiment(
                 sec_state,
             )
         elif algorithm == "FxFDAF":
-            e_fr, y_ctrl_fr, y_out_fr, w_fr = _fxfdaf_frame(
+            e_fr, y_ctrl_fr, y_out_fr, w_fr, x_state_fdaf = _fxfdaf_frame(
                 x_block=x_fr,
                 d_block=d_fr,
                 h_hat=h_hat,
                 w=w,
+                x_state=x_state_fdaf,
                 mu=mu,
                 beta=beta,
-                block_size=frame_len,
+                block_size=fdaf_block_size,
             )
-            w = np.zeros_like(w)
-            w[: min(len(w), len(w_fr))] = w_fr[: min(len(w), len(w_fr))]
+            w = np.asarray(w, dtype=np.float64)
+            w[: min(len(w), len(w_fr))] = np.asarray(w_fr[: min(len(w), len(w_fr))], dtype=np.float64)
         else:
             raise ValueError(f"Unknown FIR algorithm: {algorithm}")
 
