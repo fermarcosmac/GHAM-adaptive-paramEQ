@@ -99,10 +99,7 @@ def _plot_response_mean_std(ax, series, color, label):
     avg = np.mean(y, axis=0)
     std = np.std(y, axis=0)
     m = ref_f > 0
-    # Raw mean curve in the background (same color, dimmer).
-    ax.plot(ref_f[m], avg[m], color=color, linewidth=0.9, alpha=0.25)
-
-    # Smoothed curve in front.
+    # Plot only smoothed response to avoid clutter.
     f_s, avg_s = _log_smooth_curve(ref_f[m], avg[m], window_pts=121)
     _, std_s = _log_smooth_curve(ref_f[m], std[m], window_pts=121)
     ax.plot(f_s, avg_s, color=color, linewidth=1.25, label=label)
