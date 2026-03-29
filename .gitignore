@@ -8,3 +8,6 @@ data/audio/output/*
 !data/SoundCam/.gitkeep
 !data/MedleyDB/.gitkeep
 !data/audio/output/.gitkeep
+
+# Python bytecode caches
+__pycache__/
