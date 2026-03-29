@@ -297,7 +297,7 @@ def run_fir_baseline_experiment(
 
     # TODO: estimate h_hat from input/output data
     h_hat = np.asarray(rir_ctx["rirs"][0], dtype=np.float64)
-    h_hat = h_hat[:4096] # TODO: hardcoded!
+    h_hat = h_hat[:8192] # TODO: hardcoded!
     # max_h_hat_len = int(algo_cfg.get("h_hat_len", 0))
     # if max_h_hat_len > 0:
     #     h_hat = h_hat[:max_h_hat_len]

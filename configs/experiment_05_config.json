@@ -33,7 +33,7 @@
     "FxFDAF": {
       "enabled": true,
       "mu": 0.005,
-      "beta": 0.50,
+      "beta": 0.10,
       "filter_len": 1024
     }
   },
