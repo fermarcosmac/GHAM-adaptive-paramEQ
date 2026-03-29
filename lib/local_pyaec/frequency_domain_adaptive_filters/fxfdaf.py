@@ -20,13 +20,13 @@ from scipy.signal import fftconvolve
 from numpy.fft import rfft as fft
 from numpy.fft import irfft as ifft
 
-def fxfdaf(x, d, h_hat, M, mu=0.05, beta=0.9, W_init: np.ndarray = None):
+def fxfdaf(x, d, h_hat, M, mu=0.05, beta=0.9, W_init: np.ndarray = None, x_state: np.ndarray = None):
 
   W = np.zeros(M+1,dtype=np.complex128) if W_init is None else W_init
   norm = np.full(M+1,1e-8)
 
   window =  np.hanning(M)
-  x_old = np.zeros(M)
+  x_old = np.zeros(M) if x_state is None else x_state
 
   num_block = min(len(x),len(d)) // M
   e = np.zeros(num_block*M)
@@ -54,4 +54,4 @@ def fxfdaf(x, d, h_hat, M, mu=0.05, beta=0.9, W_init: np.ndarray = None):
     w[M:] = 0
     W = fft(w)
 
-  return e, W
+  return e, W, x_old
