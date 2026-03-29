@@ -193,7 +193,6 @@ def _fxlms_frame(
     sec_state: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Wrapper around local_pyaec FxLMS for one frame-sized block."""
-    # I think compensator filter is being reinitialized after each call.
     # Why does error not decrease over time?
     # TODO: debug!
     e, w_new, u_state, u_f_state, x_state = lib_fxlms.fxlms(x_block, d_block, h_hat=h_hat, N=len(w), mu=mu, w_init = w, u_state=u_state, u_f_state=u_f_state, x_state=x_state)
