@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import shutil
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -9,6 +10,28 @@ import numpy as np
 
 
 root = Path(__file__).resolve().parent.parent
+
+
+def _configure_text_rendering() -> None:
+    """Prefer true LaTeX text rendering; fall back to Computer Modern mathtext."""
+    if shutil.which("latex"):
+        plt.rcParams.update(
+            {
+                "text.usetex": True,
+                "font.family": "serif",
+                "font.serif": ["Computer Modern Roman"],
+                "axes.unicode_minus": False,
+            }
+        )
+    else:
+        plt.rcParams.update(
+            {
+                "text.usetex": False,
+                "font.family": "serif",
+                "mathtext.fontset": "cm",
+                "axes.unicode_minus": False,
+            }
+        )
 
 
 def _log_smooth_curve(freq_hz, mag_db, window_pts: int = 61):
@@ -107,6 +130,7 @@ def _plot_response_mean_std(ax, series, color, label):
 
 
 def plot_results(experiment_name: str) -> None:
+    _configure_text_rendering()
     cfg, data, results_root = load_results(experiment_name)
 
     td_mse_curves = data.get("td_mse_curves", {})
@@ -146,7 +170,8 @@ def plot_results(experiment_name: str) -> None:
     algo_color = {a: colors(i % 10) for i, a in enumerate(algorithms)}
 
     n_rows = len(transition_times)
-    fig = plt.figure(figsize=(10, max(4.8, 2.5 * n_rows + 2.8)))
+    # Single-column paper friendly: compact square canvas.
+    fig = plt.figure(figsize=(5, 5))
     gs = fig.add_gridspec(n_rows + 1, 2, height_ratios=[1.0] * n_rows + [1.2])
     axes = np.empty((n_rows, 2), dtype=object)
     for row in range(n_rows):
@@ -175,33 +200,34 @@ def plot_results(experiment_name: str) -> None:
                         ax.axvspan(float(t_start), float(t_end), color="0.85", alpha=0.35)
             ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.8)
             if row == n_rows - 1:
-                ax.set_xlabel("Time [s]")
+                ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
 
         ax_td.set_yscale("log")
-        ax_td.set_ylabel(f"TD-MSE\n(tt={tt}s)")
-        ax_td.set_title("Time-domain MSE")
+        ax_td.set_ylabel(rf"$\mathrm{{TD-MSE}}$")
+        ax_td.set_title(r"$\mathrm{Time\mathrm{-}domain\ MSE}$")
 
         ax_val.axhline(1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-        ax_val.set_ylabel("Validation error")
-        ax_val.set_title("Frequency-domain validation")
+        ax_val.set_ylim(0.0, 10.0)
+        ax_val.set_ylabel(r"$D_{\mathrm{rel}}$")
+        ax_val.set_title(r"$\mathrm{Relative\ system\ distance}$")
 
     handles, labels = axes[0, 0].get_legend_handles_labels()
     if handles:
-        axes[0, 0].legend(handles, labels, loc="upper right", fontsize=8)
+        axes[0, 0].legend(handles, labels, loc="upper right", fontsize=8, labelspacing=0.2)
 
     # Bottom subplot: desired response, true LEM (unprocessed), and final equalized response.
     if target_example is not None and len(target_example.get("freq_axis", [])):
         f = np.asarray(target_example["freq_axis"], dtype=float)
         tdb = np.asarray(target_example["target_mag_db"], dtype=float)
         m = f > 0
-        ax_resp.plot(f[m], tdb[m], color="black", linestyle="-", linewidth=1.3, label="Desired")
+        ax_resp.plot(f[m], tdb[m], color="black", linestyle="-", linewidth=1.3, label=r"$\mathrm{Desired}$")
 
     if true_lem_example is not None and len(true_lem_example.get("freq_axis", [])):
         f_lem = np.asarray(true_lem_example["freq_axis"], dtype=float)
         lem_db = np.asarray(true_lem_example["lem_mag_db"], dtype=float)
         m_lem = (f_lem > 0) & np.isfinite(lem_db)
         f_lem_s, lem_db_s = _log_smooth_curve(f_lem[m_lem], lem_db[m_lem], window_pts=121)
-        ax_resp.plot(f_lem_s, lem_db_s, color="black", linestyle="--", linewidth=1.1, label="True LEM (unprocessed)")
+        ax_resp.plot(f_lem_s, lem_db_s, color="black", linestyle="--", linewidth=1.1, label=r"$\mathrm{True\ LEM\ (unprocessed)}$")
     else:
         print("No true_lem_response_example found in plot data. Re-run experiment_05.py after saving true LEM response to include dashed black reference.")
 
@@ -218,14 +244,14 @@ def plot_results(experiment_name: str) -> None:
 
     ax_resp.set_xscale("log")
     ax_resp.set_xlim(20, 24000)
-    ax_resp.set_xlabel("Frequency [Hz]")
+    ax_resp.set_xlabel(r"$\mathrm{Frequency\ [Hz]}$")
     ax_resp.set_ylim(-40, 20)
-    ax_resp.set_ylabel("Magnitude [dB]")
-    ax_resp.set_title("Desired vs Final Equalized Response")
+    ax_resp.set_ylabel(r"$\mathrm{Magnitude\ [dB]}$")
+    ax_resp.set_title(r"$\mathrm{Desired\ vs\ Final\ Equalized\ Response}$")
     ax_resp.grid(True, linestyle=":", linewidth=0.6, alpha=0.8)
     handles_resp, labels_resp = ax_resp.get_legend_handles_labels()
     if handles_resp:
-        ax_resp.legend(handles_resp, labels_resp, loc="best", fontsize=8)
+        ax_resp.legend(handles_resp, labels_resp, loc="best", fontsize=8, labelspacing=0.2)
 
     fig.tight_layout()
     out_png = results_root / f"{experiment_name}_curves.png"
@@ -241,7 +267,7 @@ def plot_results(experiment_name: str) -> None:
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
     tbl.scale(1.0, 1.2)
-    ax_t.set_title("Average per-frame compute time [s/frame]")
+    ax_t.set_title(r"$\mathrm{Average\ per\mathrm{-}frame\ compute\ time\ [s/frame]}$")
     fig_t.tight_layout()
     out_table = results_root / f"{experiment_name}_compute_time_table.png"
     fig_t.savefig(out_table, dpi=180)
