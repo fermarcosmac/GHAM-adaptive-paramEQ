@@ -129,6 +129,11 @@ def _plot_response_mean_std(ax, series, color, label):
     ax.fill_between(f_s, avg_s - std_s, avg_s + std_s, color=color, alpha=0.16, linewidth=0)
 
 
+def _display_algo_label(algo: str) -> str:
+    """Use iHAM naming in figure labels while keeping internal keys unchanged."""
+    return str(algo).replace("GHAM", "iHAM")
+
+
 def plot_results(experiment_name: str) -> None:
     _configure_text_rendering()
     cfg, data, results_root = load_results(experiment_name)
@@ -151,7 +156,7 @@ def plot_results(experiment_name: str) -> None:
 
     # Console compute-time table
     print("Average compute time per frame [s/frame]:")
-    header = "transition_time_s" + "".join(f"\t{a}" for a in algorithms)
+    header = "transition_time_s" + "".join(f"\t{_display_algo_label(a)}" for a in algorithms)
     print(header)
     ct_table = np.full((len(transition_times), len(algorithms)), np.nan)
     for i, tt in enumerate(transition_times):
@@ -187,8 +192,8 @@ def plot_results(experiment_name: str) -> None:
 
         for algo in algorithms:
             key = (tt, algo)
-            _plot_mean_std(ax_td, td_mse_curves.get(key, []), algo_color[algo], algo)
-            _plot_mean_std(ax_val, validation_curves.get(key, []), algo_color[algo], algo)
+            _plot_mean_std(ax_td, td_mse_curves.get(key, []), algo_color[algo], _display_algo_label(algo))
+            _plot_mean_std(ax_val, validation_curves.get(key, []), algo_color[algo], _display_algo_label(algo))
 
         for ax in (ax_td, ax_val):
             trans = tt_transitions.get(tt, None)
@@ -238,7 +243,7 @@ def plot_results(experiment_name: str) -> None:
                 by_algo[algo] = []
             by_algo[algo].extend(series)
         for algo in sorted(by_algo.keys()):
-            _plot_response_mean_std(ax_resp, by_algo[algo], algo_color.get(algo, "C0"), algo)
+            _plot_response_mean_std(ax_resp, by_algo[algo], algo_color.get(algo, "C0"), _display_algo_label(algo))
     else:
         print("No final_response_curves found in plot data. Re-run experiment_05.py to populate final equalized response subplot.")
 
@@ -263,7 +268,8 @@ def plot_results(experiment_name: str) -> None:
     ax_t.axis("off")
     cell_text = [[f"{v:.6f}" if np.isfinite(v) else "-" for v in row] for row in ct_table]
     row_labels = [f"tt={tt}s" for tt in transition_times]
-    tbl = ax_t.table(cellText=cell_text, rowLabels=row_labels, colLabels=algorithms, cellLoc="center", loc="center")
+    table_labels = [_display_algo_label(a) for a in algorithms]
+    tbl = ax_t.table(cellText=cell_text, rowLabels=row_labels, colLabels=table_labels, cellLoc="center", loc="center")
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
     tbl.scale(1.0, 1.2)
