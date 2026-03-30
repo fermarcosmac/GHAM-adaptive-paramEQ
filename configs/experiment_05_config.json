@@ -13,8 +13,8 @@
   },
   "proposed_configs": [
     {
-      "label": "GHAM1_FD",
-      "optim_type": "GHAM-1",
+      "label": "SGD_FD",
+      "optim_type": "SGD",
       "loss_type": "FD-MSE",
       "mu_opt": 0.005,
       "lambda_newton": 1000.0,
@@ -40,7 +40,7 @@
   "input": {
     "use_white_noise": false,
     "use_songs_folder": true,
-    "max_num_songs": 12,
-    "max_audio_len_s": [120.0]
+    "max_num_songs": 4,
+    "max_audio_len_s": [180.0]
   }
 }
