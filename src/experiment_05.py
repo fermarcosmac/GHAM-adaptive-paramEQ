@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import sys
 import json
 import pickle
 import random
 from collections import defaultdict
 from pathlib import Path
+root = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "lib"))
 
 import numpy as np
 import torch
 
+from lib.local_dasp_pytorch import signal as dasp_signal
+from lib.local_dasp_pytorch.modules import ParametricEQ
 from utils_ex04 import discover_input_signals, iter_param_grid, load_config, run_control_experiment
 from utils_ex05 import build_proposed_sim_cfg, run_fir_baseline_experiment
 
@@ -84,6 +90,74 @@ def _estimate_final_equalized_response(
 	H = Y / (X + 1e-12)
 	freqs = np.fft.rfftfreq(nfft, d=1.0 / float(sr))
 	mag_db = 20.0 * np.log10(np.abs(H) + 1e-12)
+	mag_db = np.nan_to_num(mag_db, nan=-120.0, posinf=120.0, neginf=-120.0)
+	mag_db = np.clip(mag_db, -120.0, 120.0)
+	return freqs.astype(np.float64), mag_db.astype(np.float64)
+
+
+def _compute_exact_final_response_proposed(
+	final_eq_params_normalized: np.ndarray,
+	final_gain_db: np.ndarray,
+	true_lem_ir: np.ndarray,
+	sr: int,
+	nfft: int,
+) -> tuple[np.ndarray, np.ndarray]:
+	"""Compute exact final compensated response: |H_eq * H_lem| in dB for proposed parametric EQ."""
+	eq = ParametricEQ(sample_rate=int(sr))
+	norm = np.asarray(final_eq_params_normalized, dtype=np.float32)
+	if norm.ndim == 1:
+		norm = norm[None, :]
+	norm_t = torch.from_numpy(norm)
+
+	with torch.no_grad():
+		param_dict = eq.extract_param_dict(norm_t)
+		p = eq.denormalize_param_dict(param_dict)
+
+		sos = torch.zeros(1, 7, 6, dtype=torch.float32)
+		b, a = dasp_signal.biquad(p["low_shelf_gain_db"], p["low_shelf_cutoff_freq"], p["low_shelf_q_factor"], float(sr), "low_shelf")
+		sos[:, 0, :] = torch.cat((b, a), dim=-1)
+		b, a = dasp_signal.biquad(p["band0_gain_db"], p["band0_cutoff_freq"], p["band0_q_factor"], float(sr), "peaking")
+		sos[:, 1, :] = torch.cat((b, a), dim=-1)
+		b, a = dasp_signal.biquad(p["band1_gain_db"], p["band1_cutoff_freq"], p["band1_q_factor"], float(sr), "peaking")
+		sos[:, 2, :] = torch.cat((b, a), dim=-1)
+		b, a = dasp_signal.biquad(p["band2_gain_db"], p["band2_cutoff_freq"], p["band2_q_factor"], float(sr), "peaking")
+		sos[:, 3, :] = torch.cat((b, a), dim=-1)
+		b, a = dasp_signal.biquad(p["band3_gain_db"], p["band3_cutoff_freq"], p["band3_q_factor"], float(sr), "peaking")
+		sos[:, 4, :] = torch.cat((b, a), dim=-1)
+		b, a = dasp_signal.biquad(p["band4_gain_db"], p["band4_cutoff_freq"], p["band4_q_factor"], float(sr), "peaking")
+		sos[:, 5, :] = torch.cat((b, a), dim=-1)
+		b, a = dasp_signal.biquad(p["high_shelf_gain_db"], p["high_shelf_cutoff_freq"], p["high_shelf_q_factor"], float(sr), "high_shelf")
+		sos[:, 6, :] = torch.cat((b, a), dim=-1)
+
+		h_eq = dasp_signal.fft_sosfreqz(sos, n_fft=int(nfft)).squeeze(0).detach().cpu().numpy()
+
+	gain_db = float(np.asarray(final_gain_db, dtype=np.float64).reshape(-1)[0])
+	h_eq = h_eq * (10.0 ** (gain_db / 20.0))
+
+	lem = np.asarray(true_lem_ir, dtype=np.float64)
+	h_lem = np.fft.rfft(lem, n=int(nfft))
+	h_total = h_eq * h_lem
+	freqs = np.fft.rfftfreq(int(nfft), d=1.0 / float(sr))
+	mag_db = 20.0 * np.log10(np.abs(h_total) + 1e-12)
+	mag_db = np.nan_to_num(mag_db, nan=-120.0, posinf=120.0, neginf=-120.0)
+	mag_db = np.clip(mag_db, -120.0, 120.0)
+	return freqs.astype(np.float64), mag_db.astype(np.float64)
+
+
+def _compute_exact_final_response_fir(
+	final_ctrl_ir: np.ndarray,
+	true_lem_ir: np.ndarray,
+	sr: int,
+	nfft: int,
+) -> tuple[np.ndarray, np.ndarray]:
+	"""Compute exact final compensated response: |H_fir * H_lem| in dB for FIR baselines."""
+	ctrl = np.asarray(final_ctrl_ir, dtype=np.float64)
+	lem = np.asarray(true_lem_ir, dtype=np.float64)
+	h_ctrl = np.fft.rfft(ctrl, n=int(nfft))
+	h_lem = np.fft.rfft(lem, n=int(nfft))
+	h_total = h_ctrl * h_lem
+	freqs = np.fft.rfftfreq(int(nfft), d=1.0 / float(sr))
+	mag_db = 20.0 * np.log10(np.abs(h_total) + 1e-12)
 	mag_db = np.nan_to_num(mag_db, nan=-120.0, posinf=120.0, neginf=-120.0)
 	mag_db = np.clip(mag_db, -120.0, 120.0)
 	return freqs.astype(np.float64), mag_db.astype(np.float64)
@@ -192,12 +266,21 @@ def main() -> None:
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))
 
-				resp_f, resp_db = _estimate_final_equalized_response(
-					input_audio=np.asarray(result.get("input_audio", []), dtype=np.float64),
-					output_audio=np.asarray(result.get("y_control", []), dtype=np.float64),
-					sr=int(result.get("sr", sim_cfg.get("sr", 48000))),
-					frame_len=frame_len,
-				)
+				if all(k in result for k in ("final_eq_params_normalized", "final_gain_db", "final_true_lem_ir")):
+					resp_f, resp_db = _compute_exact_final_response_proposed(
+						final_eq_params_normalized=np.asarray(result.get("final_eq_params_normalized"), dtype=np.float32),
+						final_gain_db=np.asarray(result.get("final_gain_db"), dtype=np.float32),
+						true_lem_ir=np.asarray(result.get("final_true_lem_ir"), dtype=np.float32),
+						sr=int(result.get("sr", sim_cfg.get("sr", 48000))),
+						nfft=int(2 * frame_len - 1),
+					)
+				else:
+					resp_f, resp_db = _estimate_final_equalized_response(
+						input_audio=np.asarray(result.get("input_audio", []), dtype=np.float64),
+						output_audio=np.asarray(result.get("y_control", []), dtype=np.float64),
+						sr=int(result.get("sr", sim_cfg.get("sr", 48000))),
+						frame_len=frame_len,
+					)
 				if resp_f.size and resp_db.size:
 					final_response_curves[key].append((resp_f, resp_db))
 
@@ -240,12 +323,20 @@ def main() -> None:
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))
 
-				resp_f, resp_db = _estimate_final_equalized_response(
-					input_audio=np.asarray(fir_result.get("input_audio", []), dtype=np.float64),
-					output_audio=np.asarray(fir_result.get("y_control", []), dtype=np.float64),
-					sr=int(fir_result.get("sr", sim_cfg.get("sr", 48000))),
-					frame_len=frame_len,
-				)
+				if all(k in fir_result for k in ("final_ctrl_ir", "final_true_lem_ir")):
+					resp_f, resp_db = _compute_exact_final_response_fir(
+						final_ctrl_ir=np.asarray(fir_result.get("final_ctrl_ir"), dtype=np.float32),
+						true_lem_ir=np.asarray(fir_result.get("final_true_lem_ir"), dtype=np.float32),
+						sr=int(fir_result.get("sr", sim_cfg.get("sr", 48000))),
+						nfft=int(2 * frame_len - 1),
+					)
+				else:
+					resp_f, resp_db = _estimate_final_equalized_response(
+						input_audio=np.asarray(fir_result.get("input_audio", []), dtype=np.float64),
+						output_audio=np.asarray(fir_result.get("y_control", []), dtype=np.float64),
+						sr=int(fir_result.get("sr", sim_cfg.get("sr", 48000))),
+						frame_len=frame_len,
+					)
 				if resp_f.size and resp_db.size:
 					final_response_curves[key].append((resp_f, resp_db))
 

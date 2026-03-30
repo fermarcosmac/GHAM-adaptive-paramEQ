@@ -1672,6 +1672,9 @@ def run_control_experiment(sim_cfg: Dict[str, Any], input_spec: Tuple[str, Dict[
         "n_frames": int(n_frames),
         "control_experiment_time_s": float(total_compute_time_s),
         "avg_compute_time_per_frame_s": float(avg_compute_time_per_frame_s),
+        "final_eq_params_normalized": EQG_params[:, :-1].detach().cpu().numpy().astype(np.float32),
+        "final_gain_db": EQG_params[:, -1:].detach().cpu().numpy().astype(np.float32),
+        "final_true_lem_ir": LEM.squeeze().detach().cpu().numpy().astype(np.float32),
     }
     if checkpoint_states:
         result["checkpoints"] = checkpoint_states

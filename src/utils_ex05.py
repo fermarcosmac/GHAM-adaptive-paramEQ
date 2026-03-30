@@ -405,6 +405,8 @@ def run_fir_baseline_experiment(
         "n_frames": int(n_frames),
         "control_experiment_time_s": elapsed,
         "avg_compute_time_per_frame_s": elapsed / n_frames if n_frames > 0 else float("nan"),
+        "final_ctrl_ir": np.asarray(w, dtype=np.float32),
+        "final_true_lem_ir": np.asarray(lem_ir, dtype=np.float32),
     }
 
 
