@@ -406,6 +406,9 @@ def _plot_validation_only_column_true_lem(
 
     all_curve_keys = list(curves.keys())
     unique_tt = sorted({k[0] for k in all_curve_keys})
+    # Only plot smallest and largest transition times for the TRUE_LEM figure.
+    if len(unique_tt) > 2:
+        unique_tt = [unique_tt[0], unique_tt[-1]]
     optim_types = sorted({k[1] for k in all_curve_keys})
     unique_loss_types = sorted({k[2] for k in all_curve_keys})
 
@@ -413,24 +416,24 @@ def _plot_validation_only_column_true_lem(
     optim_to_color = {opt: color_map(i % 10) for i, opt in enumerate(optim_types)}
     lt_linestyle = {lt: ls for lt, ls in zip(unique_loss_types, ["-", "--", "-.", ":"])}
 
-    n_rows = len(unique_tt)
-    n_cols = 1
+    n_rows = 1
+    n_cols = len(unique_tt)
 
     # Match the same subplot styling/layout conventions as _plot_dual_scenario_validation.
-    fig = plt.figure(figsize=(3.0 * n_cols + 1.5, 1.5 * n_rows + 0.8))
+    fig = plt.figure(figsize=(2.8 * n_cols + 1.2, 1.5 * n_rows + 0.8))
     gs = fig.add_gridspec(
         n_rows, n_cols + 1,
-        width_ratios=[0.22] + [1.0] * n_cols,
+        width_ratios=[0.12] + [1.0] * n_cols,
+        wspace=0.02,
     )
-    label_axes = [fig.add_subplot(gs[r, 0]) for r in range(n_rows)]
+    label_axes = [fig.add_subplot(gs[0, 0])]
     for ax_label in label_axes:
         ax_label.set_axis_off()
-    axes = np.array([fig.add_subplot(gs[r, 1]) for r in range(n_rows)])
+    axes = np.array([fig.add_subplot(gs[0, c + 1]) for c in range(n_cols)])
 
-    for row_i, tt in enumerate(unique_tt):
-        ax = axes[row_i]
-        if row_i == 0:
-            ax.set_title(r"$\mathrm{Moving\ position\ (all\ songs, \ true\ LEM)}$")
+    for col_i, tt in enumerate(unique_tt):
+        ax = axes[col_i]
+        ax.set_title(f"Transition time = {tt} s", pad=14)
 
         # Keep per-axis geometry consistent with the dual-scenario subplot style.
         if hasattr(ax, "set_box_aspect"):
@@ -473,7 +476,7 @@ def _plot_validation_only_column_true_lem(
         ax.set_yticks([0, 1])
         ax.set_yticklabels(["0", "1"])
 
-        is_bottom_row = (row_i == n_rows - 1)
+        is_bottom_row = True
         ax.tick_params(
             axis="x",
             which="both",
@@ -485,22 +488,13 @@ def _plot_validation_only_column_true_lem(
         ax.tick_params(
             axis="y",
             which="both",
-            left=True,
-            labelleft=True,
+            left=(col_i == 0),
+            labelleft=(col_i == 0),
             right=False,
             labelright=False,
         )
         if is_bottom_row:
             ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
-
-        label_axes[row_i].text(
-            0.5, 0.5,
-            f"Transition\ntime: {tt} s",
-            transform=label_axes[row_i].transAxes,
-            ha="center",
-            va="center",
-            fontsize=9,
-        )
 
     handles, labels = axes[0].get_legend_handles_labels()
     if handles:
@@ -524,7 +518,17 @@ def _plot_validation_only_column_true_lem(
             borderaxespad=0.2,
         )
 
-    fig.tight_layout(pad=0.3, w_pad=0.1, h_pad=0.9)
+    fig.tight_layout(
+        pad=0.6,
+        w_pad=0.05,
+        h_pad=1.15,
+        rect=(0.03, 0.12, 0.97, 0.90),
+    )
+    fig.subplots_adjust(top=0.9, bottom=0.12)
+
+    output_dir = Path(__file__).resolve().parents[1] / "figs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_dir / "experiment_04_true_lem_validation.png", dpi=200, bbox_inches="tight")
 
 
 def _plot_frame_size_validation_overlay_grids(
@@ -1008,7 +1012,7 @@ def plot_results(cfg: dict, plot1_data: dict, n_remove_highest_mean_curves: int 
 
 def main() -> None:
     # Select the experiment to plot here
-    experiment_name = "experiment_04_DEBUG"
+    experiment_name = "experiment_04_ALL_SONGS_MOVING_POSITION_TRUE_LEM"
     n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
 
     # Project root (same convention as experiment_04.py)
