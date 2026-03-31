@@ -4,6 +4,7 @@ import sys
 import json
 import pickle
 import random
+import re
 from collections import defaultdict
 from pathlib import Path
 root = Path(__file__).resolve().parent.parent
@@ -12,6 +13,7 @@ sys.path.insert(0, str(root / "lib"))
 
 import numpy as np
 import torch
+import torchaudio
 
 from lib.local_dasp_pytorch import signal as dasp_signal
 from lib.local_dasp_pytorch.modules import ParametricEQ
@@ -163,6 +165,22 @@ def _compute_exact_final_response_fir(
 	return freqs.astype(np.float64), mag_db.astype(np.float64)
 
 
+def _safe_token(s: str) -> str:
+	return re.sub(r"[^A-Za-z0-9._-]+", "_", str(s))
+
+
+def _save_wav(path: Path, arr: np.ndarray, sr: int) -> None:
+	x = np.asarray(arr, dtype=np.float32)
+	if x.size == 0:
+		return
+	peak = float(np.max(np.abs(x)))
+	if peak > 0:
+		x = x / peak
+	t = torch.from_numpy(x).float().unsqueeze(0)
+	torchaudio.save(str(path), t, int(sr))
+	print(f"Saved audio: {path}")
+
+
 def main() -> None:
 	cfg = load_config(root / "configs" / "experiment_05_config.json")
 	seed = int(cfg.get("seed", 124))
@@ -197,6 +215,9 @@ def main() -> None:
 	tt_transitions = {}
 	input_ids_used = set()
 	final_response_curves = defaultdict(list)
+	audio_out_dir = root / "data" / "audio" / "output" / experiment_name
+	audio_out_dir.mkdir(parents=True, exist_ok=True)
+	audio_saved_keys = set()
 
 	# Optional metadata for plotting target response if available.
 	target_response_example = None
@@ -234,6 +255,7 @@ def main() -> None:
 			print(f"Scenario: {scenario}")
 			print(f"Input: {_song_stem(input_spec)}")
 			print("############################################")
+			song = _song_stem(input_spec)
 
 			# 1) Proposed framework configurations (experiment_04 controller)
 			for proposed_entry in proposed_cfgs:
@@ -265,6 +287,25 @@ def main() -> None:
 				key = (sim_cfg["transition_time_s"], f"Proposed:{label}")
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))
+
+				sr_audio = int(result.get("sr", sim_cfg.get("sr", 48000)))
+				common_key = ("common", song)
+				if common_key not in audio_saved_keys:
+					_save_wav(audio_out_dir / f"desired_{song}.wav", np.asarray(result.get("desired_audio", []), dtype=np.float32), sr_audio)
+					_save_wav(audio_out_dir / f"noEQ_{song}.wav", np.asarray(result.get("y_noEQ", []), dtype=np.float32), sr_audio)
+					audio_saved_keys.add(common_key)
+
+				safe_algo = _safe_token(f"Proposed_{label}")
+				safe_lt = _safe_token(sim_cfg.get("loss_type", "NA")).replace("-", "_")
+				safe_tt = _safe_token(str(sim_cfg["transition_time_s"]).replace(".", "p"))
+				eq_key = (safe_algo, safe_lt, safe_tt, song)
+				if eq_key not in audio_saved_keys:
+					_save_wav(
+						audio_out_dir / f"EQ_{safe_algo}_{safe_lt}_tt{safe_tt}_{song}.wav",
+						np.asarray(result.get("y_control", []), dtype=np.float32),
+						sr_audio,
+					)
+					audio_saved_keys.add(eq_key)
 
 				if all(k in result for k in ("final_eq_params_normalized", "final_gain_db", "final_true_lem_ir")):
 					resp_f, resp_db = _compute_exact_final_response_proposed(
@@ -322,6 +363,29 @@ def main() -> None:
 
 				td_mse_curves[key].append((t_axis, td_curve))
 				validation_curves[key].append((t_axis, v_curve))
+
+				sr_audio = int(fir_result.get("sr", sim_cfg.get("sr", 48000)))
+				common_key = ("common", song)
+				if common_key not in audio_saved_keys:
+					_save_wav(audio_out_dir / f"desired_{song}.wav", np.asarray(fir_result.get("desired_audio", []), dtype=np.float32), sr_audio)
+					if "final_true_lem_ir" in fir_result:
+						x_in = np.asarray(fir_result.get("input_audio", []), dtype=np.float64)
+						h_lem = np.asarray(fir_result.get("final_true_lem_ir", []), dtype=np.float64)
+						y_noeq = np.convolve(x_in, h_lem, mode="full")[: len(x_in)]
+						_save_wav(audio_out_dir / f"noEQ_{song}.wav", y_noeq.astype(np.float32), sr_audio)
+					audio_saved_keys.add(common_key)
+
+				safe_algo = _safe_token(algo_name)
+				safe_lt = "NA"
+				safe_tt = _safe_token(str(fir_result["transition_time_s"]).replace(".", "p"))
+				eq_key = (safe_algo, safe_lt, safe_tt, song)
+				if eq_key not in audio_saved_keys:
+					_save_wav(
+						audio_out_dir / f"EQ_{safe_algo}_{safe_lt}_tt{safe_tt}_{song}.wav",
+						np.asarray(fir_result.get("y_control", []), dtype=np.float32),
+						sr_audio,
+					)
+					audio_saved_keys.add(eq_key)
 
 				if all(k in fir_result for k in ("final_ctrl_ir", "final_true_lem_ir")):
 					resp_f, resp_db = _compute_exact_final_response_fir(
@@ -382,6 +446,7 @@ def main() -> None:
 
 	print(f"Saved config: {config_out}")
 	print(f"Saved plot data: {out_path}")
+	print(f"Saved audio directory: {audio_out_dir}")
 
 
 if __name__ == "__main__":

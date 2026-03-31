@@ -218,7 +218,7 @@ def _display_algo_label(algo: str) -> str:
 
 
 def _add_panel_label(ax, label: str) -> None:
-    """Add a large panel label inside the bottom-left corner of an axes."""
+    """Add a large panel label inside the top-right corner of an axes."""
     ax.text(
         0.94,
         0.92,

@@ -27,13 +27,13 @@
   "fir_baselines": {
     "FxLMS": {
       "enabled": true,
-      "mu": 0.0001,
+      "mu": 0.00001,
       "filter_len": 1024
     },
     "FxFDAF": {
       "enabled": true,
       "mu": 0.005,
-      "beta": 0.01,
+      "beta": 0.001,
       "filter_len": 1024
     }
   },
