@@ -27,7 +27,7 @@
   "fir_baselines": {
     "FxLMS": {
       "enabled": true,
-      "mu": 0.00001,
+      "mu": 0.0001,
       "filter_len": 1024
     },
     "FxFDAF": {
@@ -38,9 +38,9 @@
     }
   },
   "input": {
-    "use_white_noise": false,
-    "use_songs_folder": true,
-    "max_num_songs": 12,
+    "use_white_noise": true,
+    "use_songs_folder": false,
+    "max_num_songs": 1,
     "max_audio_len_s": [180.0]
   }
 }

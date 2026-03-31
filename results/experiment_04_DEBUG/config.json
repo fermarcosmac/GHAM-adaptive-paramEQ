@@ -9,7 +9,7 @@
       ]
     ],
     "frame_len": [
-      8192
+      1024
     ],
     "window_type": [
       null
@@ -18,26 +18,14 @@
       0.05
     ],
     "optim_type": [
-      "GHAM-1",
-      "SGD",
-      "Adam",
-      "GHAM-3",
-      "Newton"
+      "SGD"
     ],
     "mu_opt": {
       "FD-MSE": [
-        0.005,
-        0.005,
-        0.005,
-        0.005,
-        1.0
+        0.005
       ],
       "TD-MSE": [
-        0.0005,
-        0.005,
-        0.002,
-        0.0005,
-        1.0
+        0.005
       ]
     },
     "lambda_newton": {
@@ -45,7 +33,8 @@
       "TD-MSE": 1.0
     },
     "loss_type": [
-      "FD-MSE"
+      "FD-MSE",
+      "TD-MSE"
     ],
     "eps_0": {
       "FD-MSE": 1.0,
@@ -55,7 +44,7 @@
       "delay_and_mag"
     ],
     "n_rirs": [
-      3
+      1
     ],
     "n_checkpoints": [
       4
@@ -71,9 +60,9 @@
     ]
   },
   "input": {
-    "use_white_noise": false,
-    "use_songs_folder": true,
-    "max_num_songs": 12,
+    "use_white_noise": true,
+    "use_songs_folder": false,
+    "max_num_songs": 1,
     "max_audio_len_s": [
       180.0
     ]
