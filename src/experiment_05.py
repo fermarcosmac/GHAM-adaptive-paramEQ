@@ -211,7 +211,15 @@ def main() -> None:
 
 	td_mse_curves = defaultdict(list)
 	validation_curves = defaultdict(list)
-	compute_time_stats = defaultdict(lambda: {"total_time_s": 0.0, "total_frames": 0, "num_runs": 0})
+	compute_time_stats = defaultdict(
+		lambda: {
+			"total_time_s": 0.0,
+			"total_frames": 0,
+			"num_runs": 0,
+			"min_avg_time_per_frame_s": float("inf"),
+			"max_avg_time_per_frame_s": float("-inf"),
+		}
+	)
 	tt_transitions = {}
 	input_ids_used = set()
 	final_response_curves = defaultdict(list)
@@ -326,9 +334,14 @@ def main() -> None:
 					final_response_curves[key].append((resp_f, resp_db))
 
 				ct_key = key
-				compute_time_stats[ct_key]["total_time_s"] += float(result.get("control_experiment_time_s", 0.0))
-				compute_time_stats[ct_key]["total_frames"] += int(result.get("n_frames", 0))
-				compute_time_stats[ct_key]["num_runs"] += 1
+				stats = compute_time_stats[ct_key]
+				stats["total_time_s"] += float(result.get("control_experiment_time_s", 0.0))
+				stats["total_frames"] += int(result.get("n_frames", 0))
+				stats["num_runs"] += 1
+				avg_pf = float(result.get("avg_compute_time_per_frame_s", float("nan")))
+				if np.isfinite(avg_pf):
+					stats["min_avg_time_per_frame_s"] = min(stats["min_avg_time_per_frame_s"], avg_pf)
+					stats["max_avg_time_per_frame_s"] = max(stats["max_avg_time_per_frame_s"], avg_pf)
 
 				if key[0] not in tt_transitions:
 					tt_transitions[key[0]] = result.get("transition_times", None)
@@ -404,9 +417,14 @@ def main() -> None:
 				if resp_f.size and resp_db.size:
 					final_response_curves[key].append((resp_f, resp_db))
 
-				compute_time_stats[key]["total_time_s"] += float(fir_result.get("control_experiment_time_s", 0.0))
-				compute_time_stats[key]["total_frames"] += int(fir_result.get("n_frames", 0))
-				compute_time_stats[key]["num_runs"] += 1
+				stats = compute_time_stats[key]
+				stats["total_time_s"] += float(fir_result.get("control_experiment_time_s", 0.0))
+				stats["total_frames"] += int(fir_result.get("n_frames", 0))
+				stats["num_runs"] += 1
+				avg_pf = float(fir_result.get("avg_compute_time_per_frame_s", float("nan")))
+				if np.isfinite(avg_pf):
+					stats["min_avg_time_per_frame_s"] = min(stats["min_avg_time_per_frame_s"], avg_pf)
+					stats["max_avg_time_per_frame_s"] = max(stats["max_avg_time_per_frame_s"], avg_pf)
 
 				if key[0] not in tt_transitions:
 					tt_transitions[key[0]] = fir_result.get("transition_times", None)

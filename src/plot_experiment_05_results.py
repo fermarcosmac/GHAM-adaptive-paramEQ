@@ -261,18 +261,27 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
     algorithms = sorted({k[1] for k in all_keys})
 
     # Console compute-time table
-    print("Average compute time per frame [s/frame]:")
+    print("Compute time per frame [s/frame]: avg [min, max]")
     header = "transition_time_s" + "".join(f"\t{_display_algo_label(a)}" for a in algorithms)
     print(header)
-    ct_table = np.full((len(transition_times), len(algorithms)), np.nan)
+    avg_table = np.full((len(transition_times), len(algorithms)), np.nan)
+    min_table = np.full_like(avg_table, np.nan)
+    max_table = np.full_like(avg_table, np.nan)
     for i, tt in enumerate(transition_times):
         row = [f"{tt}"]
         for j, algo in enumerate(algorithms):
             stats = compute_time_stats.get((tt, algo), None)
             if stats and int(stats.get("total_frames", 0)) > 0:
-                v = float(stats["total_time_s"]) / float(stats["total_frames"])
-                ct_table[i, j] = v
-                row.append(f"{v:.6f}")
+                v_avg = float(stats["total_time_s"]) / float(stats["total_frames"])
+                v_min = float(stats.get("min_avg_time_per_frame_s", np.nan))
+                v_max = float(stats.get("max_avg_time_per_frame_s", np.nan))
+                avg_table[i, j] = v_avg
+                min_table[i, j] = v_min
+                max_table[i, j] = v_max
+                if np.isfinite(v_min) and np.isfinite(v_max):
+                    row.append(f"{v_avg:.6f} [{v_min:.6f}, {v_max:.6f}]")
+                else:
+                    row.append(f"{v_avg:.6f}")
             else:
                 row.append("nan")
         print("\t".join(row))
@@ -397,14 +406,27 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
     # Timing table figure
     fig_t, ax_t = plt.subplots(figsize=(max(6.0, 1.2 * len(algorithms) + 2.0), max(2.4, 0.6 * len(transition_times) + 1.8)))
     ax_t.axis("off")
-    cell_text = [[f"{v:.6f}" if np.isfinite(v) else "-" for v in row] for row in ct_table]
+    cell_text = []
+    for i in range(len(transition_times)):
+        row_cells = []
+        for j in range(len(algorithms)):
+            v_avg = avg_table[i, j]
+            v_min = min_table[i, j]
+            v_max = max_table[i, j]
+            if np.isfinite(v_avg) and np.isfinite(v_min) and np.isfinite(v_max):
+                row_cells.append(f"{v_avg:.6f}\n[{v_min:.6f}, {v_max:.6f}]")
+            elif np.isfinite(v_avg):
+                row_cells.append(f"{v_avg:.6f}")
+            else:
+                row_cells.append("-")
+        cell_text.append(row_cells)
     row_labels = [f"tt={tt}s" for tt in transition_times]
     table_labels = [_display_algo_label(a) for a in algorithms]
     tbl = ax_t.table(cellText=cell_text, rowLabels=row_labels, colLabels=table_labels, cellLoc="center", loc="center")
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
     tbl.scale(1.0, 1.2)
-    ax_t.set_title(r"$\mathrm{Average\ per\mathrm{-}frame\ compute\ time\ [s/frame]}$")
+    ax_t.set_title(r"$\mathrm{Per\mathrm{-}frame\ compute\ time\ [s/frame]:\ avg\ [min,\ max]}$")
     fig_t.tight_layout()
     out_table = results_root / f"{experiment_name}_compute_time_table.png"
     fig_t.savefig(out_table, dpi=180)
