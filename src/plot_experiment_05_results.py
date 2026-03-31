@@ -217,6 +217,27 @@ def _display_algo_label(algo: str) -> str:
     return str(algo).replace("GHAM", "iHAM")
 
 
+def _add_panel_label(ax, label: str) -> None:
+    """Add a large panel label inside the bottom-left corner of an axes."""
+    ax.text(
+        0.94,
+        0.92,
+        label,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=16,
+        fontweight="bold",
+        bbox={
+            "facecolor": "white",
+            "edgecolor": "black",
+            "linewidth": 1.0,
+            "boxstyle": "square,pad=0.3",
+        },
+        zorder=5,
+    )
+
+
 def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) -> None:
     _configure_text_rendering()
     cfg, data, results_root = load_results(experiment_name)
@@ -269,6 +290,11 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
         axes[row, 1] = fig.add_subplot(gs[row, 1])
     ax_resp = fig.add_subplot(gs[n_rows, :])
 
+    # Panel labels for paper figure convention.
+    _add_panel_label(axes[0, 0], "A")
+    _add_panel_label(axes[0, 1], "B")
+    _add_panel_label(ax_resp, "C")
+
     for row, tt in enumerate(transition_times):
         ax_td = axes[row, 0]
         ax_val = axes[row, 1]
@@ -316,10 +342,6 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
         ax_val.set_ylim(0.0, 10.0)
         ax_val.set_ylabel(r"$D_{\mathrm{rel}}$")
         ax_val.set_title(r"$\mathrm{Relative\ system\ distance}$")
-
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        axes[0, 0].legend(handles, labels, loc="upper right", fontsize=8, labelspacing=0.2)
 
     # Bottom subplot: desired response, true LEM (unprocessed), and final equalized response.
     if target_example is not None and len(target_example.get("freq_axis", [])):
