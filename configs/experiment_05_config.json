@@ -4,8 +4,8 @@
   "scenario": "moving_position",
   "shared_simulation_params": {
     "ROI": [[50.0, 20000.0]],
-    "frame_len": [8192],
-    "hop_len": [8192],
+    "frame_len": [16384],
+    "hop_len": [16384],
     "forget_factor": [0.05],
     "target_response_type": ["delay_and_mag"],
     "n_rirs": [1],
@@ -27,14 +27,14 @@
   "fir_baselines": {
     "FxLMS": {
       "enabled": true,
-      "mu": 0.00005,
-      "filter_len": 1024
+      "mu": 0.0001,
+      "filter_len": 32
     },
     "FxFDAF": {
       "enabled": true,
-      "mu": 0.005,
-      "beta": 0.001,
-      "filter_len": 1024
+      "mu": 0.01,
+      "beta": 0.95,
+      "filter_len": 32
     }
   },
   "input": {
