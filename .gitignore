@@ -1,8 +1,11 @@
-# Ignore everything inside data/SoundCam
+# Ignore everything inside these directories
 data/SoundCam/*
 data/MedleyDB/*
 data/audio/output/*
 .vscode/*
+
+# Ignore all png images
+*.png
 
 # Except this file
 !data/SoundCam/.gitkeep
