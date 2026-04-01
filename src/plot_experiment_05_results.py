@@ -11,6 +11,18 @@ import numpy as np
 root = Path(__file__).resolve().parent.parent
 
 
+def _configure_text_rendering() -> None:
+    """Use Computer Modern mathtext for a LaTeX-like look without requiring TeX."""
+    plt.rcParams.update(
+        {
+            "text.usetex": False,
+            "font.family": "serif",
+            "mathtext.fontset": "cm",
+            "axes.unicode_minus": False,
+        }
+    )
+
+
 def _log_smooth_curve(freq_hz, mag_db, window_pts: int = 61):
     """Return a moving-average smoothed curve over a log-frequency grid."""
     f = np.asarray(freq_hz, dtype=float)
@@ -48,6 +60,25 @@ def load_results(experiment_name: str) -> tuple[dict, dict, Path]:
     with pkl_path.open("rb") as f:
         plot_data = pickle.load(f)
     return cfg, plot_data, results_root
+
+
+def _display_algo_label(algo: str) -> str:
+    return str(algo).replace("GHAM", "iHAM")
+
+
+def _add_panel_label(ax, label: str) -> None:
+    ax.text(
+        0.95,
+        0.90,
+        label,
+        transform=ax.transAxes,
+        ha="right",
+        va="top",
+        fontsize=14,
+        fontweight="bold",
+        bbox={"facecolor": "white", "edgecolor": "black", "linewidth": 1.0, "boxstyle": "square,pad=0.3"},
+        zorder=5,
+    )
 
 
 def _plot_mean_std(ax, series, color, label):
@@ -99,7 +130,6 @@ def _plot_response_mean_std(ax, series, color, label):
     avg = np.mean(y, axis=0)
     std = np.std(y, axis=0)
     m = ref_f > 0
-    # Plot only smoothed response to avoid clutter.
     f_s, avg_s = _log_smooth_curve(ref_f[m], avg[m], window_pts=121)
     _, std_s = _log_smooth_curve(ref_f[m], std[m], window_pts=121)
     ax.plot(f_s, avg_s, color=color, linewidth=1.25, label=label)
@@ -107,6 +137,7 @@ def _plot_response_mean_std(ax, series, color, label):
 
 
 def plot_results(experiment_name: str) -> None:
+    _configure_text_rendering()
     cfg, data, results_root = load_results(experiment_name)
 
     td_mse_curves = data.get("td_mse_curves", {})
@@ -126,18 +157,27 @@ def plot_results(experiment_name: str) -> None:
     algorithms = sorted({k[1] for k in all_keys})
 
     # Console compute-time table
-    print("Average compute time per frame [s/frame]:")
-    header = "transition_time_s" + "".join(f"\t{a}" for a in algorithms)
+    print("Compute time per frame [s/frame]: avg [min, max]")
+    header = "transition_time_s" + "".join(f"\t{_display_algo_label(a)}" for a in algorithms)
     print(header)
-    ct_table = np.full((len(transition_times), len(algorithms)), np.nan)
+    avg_table = np.full((len(transition_times), len(algorithms)), np.nan)
+    min_table = np.full_like(avg_table, np.nan)
+    max_table = np.full_like(avg_table, np.nan)
     for i, tt in enumerate(transition_times):
         row = [f"{tt}"]
         for j, algo in enumerate(algorithms):
             stats = compute_time_stats.get((tt, algo), None)
             if stats and int(stats.get("total_frames", 0)) > 0:
-                v = float(stats["total_time_s"]) / float(stats["total_frames"])
-                ct_table[i, j] = v
-                row.append(f"{v:.6f}")
+                v_avg = float(stats["total_time_s"]) / float(stats["total_frames"])
+                v_min = float(stats.get("min_avg_time_per_frame_s", np.nan))
+                v_max = float(stats.get("max_avg_time_per_frame_s", np.nan))
+                avg_table[i, j] = v_avg
+                min_table[i, j] = v_min
+                max_table[i, j] = v_max
+                if np.isfinite(v_min) and np.isfinite(v_max):
+                    row.append(f"{v_avg:.6f} [{v_min:.6f}, {v_max:.6f}]")
+                else:
+                    row.append(f"{v_avg:.6f}")
             else:
                 row.append("nan")
         print("\t".join(row))
@@ -146,24 +186,27 @@ def plot_results(experiment_name: str) -> None:
     algo_color = {a: colors(i % 10) for i, a in enumerate(algorithms)}
 
     n_rows = len(transition_times)
-    fig = plt.figure(figsize=(10, max(4.8, 2.5 * n_rows + 2.8)))
-    gs = fig.add_gridspec(n_rows + 1, 2, height_ratios=[1.0] * n_rows + [1.2])
+    fig = plt.figure(figsize=(5.8, max(5.0, 2.6 * n_rows + 2.8)))
+    gs = fig.add_gridspec(n_rows + 1, 2, height_ratios=[1.0] * n_rows + [1.2], hspace=0.48, wspace=0.34)
     axes = np.empty((n_rows, 2), dtype=object)
     for row in range(n_rows):
         axes[row, 0] = fig.add_subplot(gs[row, 0])
         axes[row, 1] = fig.add_subplot(gs[row, 1])
     ax_resp = fig.add_subplot(gs[n_rows, :])
 
+    # Panel labels
+    _add_panel_label(axes[0, 0], "A")
+    _add_panel_label(axes[0, 1], "B")
+    _add_panel_label(ax_resp, "C")
+
     for row, tt in enumerate(transition_times):
         ax_td = axes[row, 0]
         ax_val = axes[row, 1]
-        #ax_td.set_ylim([0.0, 0.02])
-        #ax_val.set_ylim([0.00, 10.0])
 
         for algo in algorithms:
             key = (tt, algo)
-            _plot_mean_std(ax_td, td_mse_curves.get(key, []), algo_color[algo], algo)
-            _plot_mean_std(ax_val, validation_curves.get(key, []), algo_color[algo], algo)
+            _plot_mean_std(ax_td, td_mse_curves.get(key, []), algo_color[algo], _display_algo_label(algo))
+            _plot_mean_std(ax_val, validation_curves.get(key, []), algo_color[algo], _display_algo_label(algo))
 
         for ax in (ax_td, ax_val):
             trans = tt_transitions.get(tt, None)
@@ -175,33 +218,31 @@ def plot_results(experiment_name: str) -> None:
                         ax.axvspan(float(t_start), float(t_end), color="0.85", alpha=0.35)
             ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.8)
             if row == n_rows - 1:
-                ax.set_xlabel("Time [s]")
+                ax.set_xlabel(r"$\mathrm{Time\ [s]}$")
 
         ax_td.set_yscale("log")
-        ax_td.set_ylabel(f"TD-MSE\n(tt={tt}s)")
-        ax_td.set_title("Time-domain MSE")
+        ax_td.set_ylabel(r"$\mathrm{TD\text{-}MSE}$")
+        ax_td.set_title(r"$\mathrm{Time\mathrm{-}domain\ MSE}$")
 
         ax_val.axhline(1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
-        ax_val.set_ylabel("Validation error")
-        ax_val.set_title("Frequency-domain validation")
+        ax_val.set_ylabel(r"$D_{\mathrm{rel}}$")
+        ax_val.set_title(r"$\mathrm{Relative\ system\ distance}$")
 
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    if handles:
-        axes[0, 0].legend(handles, labels, loc="upper right", fontsize=8)
+    # Legend only in bottom subplot (response); skip legends on top subplots.
 
     # Bottom subplot: desired response, true LEM (unprocessed), and final equalized response.
     if target_example is not None and len(target_example.get("freq_axis", [])):
         f = np.asarray(target_example["freq_axis"], dtype=float)
         tdb = np.asarray(target_example["target_mag_db"], dtype=float)
         m = f > 0
-        ax_resp.plot(f[m], tdb[m], color="black", linestyle="-", linewidth=1.3, label="Desired")
+        ax_resp.plot(f[m], tdb[m], color="black", linestyle="-", linewidth=1.3, label=r"$\mathrm{Desired}$")
 
     if true_lem_example is not None and len(true_lem_example.get("freq_axis", [])):
         f_lem = np.asarray(true_lem_example["freq_axis"], dtype=float)
         lem_db = np.asarray(true_lem_example["lem_mag_db"], dtype=float)
         m_lem = (f_lem > 0) & np.isfinite(lem_db)
         f_lem_s, lem_db_s = _log_smooth_curve(f_lem[m_lem], lem_db[m_lem], window_pts=121)
-        ax_resp.plot(f_lem_s, lem_db_s, color="black", linestyle="--", linewidth=1.1, label="True LEM (unprocessed)")
+        ax_resp.plot(f_lem_s, lem_db_s, color="black", linestyle="--", linewidth=1.1, label=r"$\mathrm{True\ LEM\ (unprocessed)}$")
     else:
         print("No true_lem_response_example found in plot data. Re-run experiment_05.py after saving true LEM response to include dashed black reference.")
 
@@ -212,22 +253,37 @@ def plot_results(experiment_name: str) -> None:
                 by_algo[algo] = []
             by_algo[algo].extend(series)
         for algo in sorted(by_algo.keys()):
-            _plot_response_mean_std(ax_resp, by_algo[algo], algo_color.get(algo, "C0"), algo)
+            _plot_response_mean_std(ax_resp, by_algo[algo], algo_color.get(algo, "C0"), _display_algo_label(algo))
     else:
         print("No final_response_curves found in plot data. Re-run experiment_05.py to populate final equalized response subplot.")
 
     ax_resp.set_xscale("log")
     ax_resp.set_xlim(20, 24000)
-    ax_resp.set_xlabel("Frequency [Hz]")
+    ax_resp.set_xlabel(r"$\mathrm{Frequency\ [Hz]}$")
     ax_resp.set_ylim(-40, 20)
-    ax_resp.set_ylabel("Magnitude [dB]")
-    ax_resp.set_title("Desired vs Final Equalized Response")
+    ax_resp.set_ylabel(r"$\mathrm{Magnitude\ [dB]}$")
+    ax_resp.set_title(r"$\mathrm{Desired\ vs\ Final\ Equalized\ Response}$")
     ax_resp.grid(True, linestyle=":", linewidth=0.6, alpha=0.8)
     handles_resp, labels_resp = ax_resp.get_legend_handles_labels()
     if handles_resp:
-        ax_resp.legend(handles_resp, labels_resp, loc="best", fontsize=8)
+        ax_resp.legend(
+            handles_resp,
+            labels_resp,
+            loc="lower center",
+            ncol=min(2, len(handles_resp)),
+            fontsize=7.5,
+            frameon=True,
+            borderpad=0.18,
+            borderaxespad=0.6,
+            columnspacing=0.5,
+            handlelength=1.0,
+            handletextpad=0.30,
+            labelspacing=0.28,
+            fancybox=False,
+            framealpha=0.95,
+        )
 
-    fig.tight_layout()
+    fig.tight_layout(h_pad=0.9, w_pad=0.9, rect=(0.08, 0.02, 0.98, 0.98))
     out_png = results_root / f"{experiment_name}_curves.png"
     fig.savefig(out_png, dpi=180)
     print(f"Saved figure: {out_png}")
@@ -235,13 +291,27 @@ def plot_results(experiment_name: str) -> None:
     # Timing table figure
     fig_t, ax_t = plt.subplots(figsize=(max(6.0, 1.2 * len(algorithms) + 2.0), max(2.4, 0.6 * len(transition_times) + 1.8)))
     ax_t.axis("off")
-    cell_text = [[f"{v:.6f}" if np.isfinite(v) else "-" for v in row] for row in ct_table]
+    cell_text = []
+    for i in range(len(transition_times)):
+        row_cells = []
+        for j in range(len(algorithms)):
+            v_avg = avg_table[i, j]
+            v_min = min_table[i, j]
+            v_max = max_table[i, j]
+            if np.isfinite(v_avg) and np.isfinite(v_min) and np.isfinite(v_max):
+                row_cells.append(f"{v_avg:.6f}\n[{v_min:.6f}, {v_max:.6f}]")
+            elif np.isfinite(v_avg):
+                row_cells.append(f"{v_avg:.6f}")
+            else:
+                row_cells.append("-")
+        cell_text.append(row_cells)
     row_labels = [f"tt={tt}s" for tt in transition_times]
-    tbl = ax_t.table(cellText=cell_text, rowLabels=row_labels, colLabels=algorithms, cellLoc="center", loc="center")
+    table_labels = [_display_algo_label(a) for a in algorithms]
+    tbl = ax_t.table(cellText=cell_text, rowLabels=row_labels, colLabels=table_labels, cellLoc="center", loc="center")
     tbl.auto_set_font_size(False)
     tbl.set_fontsize(8)
     tbl.scale(1.0, 1.2)
-    ax_t.set_title("Average per-frame compute time [s/frame]")
+    ax_t.set_title(r"$\mathrm{Per\text{-}frame\ compute\ time\ [s/frame]:\ avg\ [min,\ max]}$")
     fig_t.tight_layout()
     out_table = results_root / f"{experiment_name}_compute_time_table.png"
     fig_t.savefig(out_table, dpi=180)
