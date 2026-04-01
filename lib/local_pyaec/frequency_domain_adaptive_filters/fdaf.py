@@ -19,6 +19,7 @@ import numpy as np
 from numpy.fft import rfft as fft
 from numpy.fft import irfft as ifft
 
+# This implementation is the overlap-save FDAF algorithm described in "Frequency-Domain and Multirate Adaptive Filtering" by John J. Shynk
 def fdaf(x, d, M, mu=0.05, beta=0.9):
   H = np.zeros(M+1,dtype=np.complex)
   norm = np.full(M+1,1e-8)
@@ -32,7 +33,7 @@ def fdaf(x, d, M, mu=0.05, beta=0.9):
   for n in range(num_block):
     x_n = np.concatenate([x_old,x[n*M:(n+1)*M]])
     d_n = d[n*M:(n+1)*M]
-    x_old = x[n*M:(n+1)*M]
+    x_old = x[n*M:(n+1)*M] # Update buffer
 
     X_n = fft(x_n)
     y_n = ifft(H*X_n)[M:]
