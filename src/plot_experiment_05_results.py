@@ -329,6 +329,7 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
         ax_val.axhline(1.0, color="black", linestyle="--", linewidth=1.0, alpha=0.7)
         ax_val.set_ylabel(r"$D_{\mathrm{rel}}$")
         ax_val.set_title(r"$\mathrm{Relative\ system\ distance}$")
+        ax_val.set_ylim(0.0, 10.0)
 
     # Legend only in bottom subplot (response); skip legends on top subplots.
 
@@ -368,7 +369,7 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
         print("No final_response_curves found in plot data. Re-run experiment_05.py to populate final equalized response subplot.")
 
     ax_resp.set_xscale("log")
-    ax_resp.set_xlim(20, 24000)
+    ax_resp.set_xlim(20, 20000)
     ax_resp.set_xlabel(r"$\mathrm{Frequency\ [Hz]}$")
     ax_resp.set_ylim(-40, 20)
     ax_resp.set_ylabel(r"$\mathrm{Magnitude\ [dB]}$")
@@ -431,7 +432,7 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
 
 
 def main() -> None:
-    experiment_name = "experiment_05_ablation_debug_2"
+    experiment_name = "experiment_05_ablation_debug"
     n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
     plot_results(
         experiment_name,
