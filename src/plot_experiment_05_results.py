@@ -66,6 +66,16 @@ def _display_algo_label(algo: str) -> str:
     return str(algo).replace("GHAM", "iHAM")
 
 
+def _format_input_label(input_signal) -> str:
+    s = str(input_signal)
+    if s.startswith("white_noise"):
+        return s
+    p = Path(s)
+    if p.suffix:
+        return p.stem
+    return s
+
+
 def _add_panel_label(ax, label: str) -> None:
     ax.text(
         0.95,
@@ -81,7 +91,67 @@ def _add_panel_label(ax, label: str) -> None:
     )
 
 
-def _plot_mean_std(ax, series, color, label):
+def _select_series_for_averaging(
+    series,
+    n_remove_highest_mean_curves: int = 0,
+    run_labels=None,
+    report_context: str = None,
+):
+    """Optionally remove n runs with the highest time-mean value."""
+    if not series:
+        return series
+
+    n_remove = max(0, int(n_remove_highest_mean_curves))
+    if n_remove == 0:
+        return series
+
+    min_len = min(len(v[1]) for v in series)
+    if min_len == 0 or len(series) <= 1:
+        return series
+
+    # Keep at least one run to avoid empty aggregation.
+    n_remove = min(n_remove, len(series) - 1)
+    if n_remove == 0:
+        return series
+
+    mean_per_run = []
+    for _, vals in series:
+        run_vals = np.asarray(vals[:min_len], dtype=float)
+        mean_per_run.append(np.nanmean(run_vals))
+
+    means = np.asarray(mean_per_run, dtype=float)
+    idx_sorted_desc = np.argsort(-means)
+    idx_remove_list = [int(i) for i in idx_sorted_desc[:n_remove]]
+    idx_remove = set(idx_remove_list)
+
+    if report_context:
+        removed_labels = []
+        for i in idx_remove_list:
+            if run_labels is not None and i < len(run_labels):
+                removed_labels.append(str(run_labels[i]))
+            else:
+                removed_labels.append(f"run_{i}")
+        if removed_labels:
+            print(f"[curve-filter] {report_context} -> removed: {', '.join(removed_labels)}")
+
+    return [s for i, s in enumerate(series) if i not in idx_remove]
+
+
+def _plot_mean_std(
+    ax,
+    series,
+    color,
+    label,
+    n_remove_highest_mean_curves: int = 0,
+    run_labels=None,
+    report_context: str = None,
+):
+    series = _select_series_for_averaging(
+        series,
+        n_remove_highest_mean_curves,
+        run_labels=run_labels,
+        report_context=report_context,
+    )
     if not series:
         return
     min_len = min(len(vals) for _, vals in series)
@@ -108,7 +178,21 @@ def _plot_mean_std(ax, series, color, label):
     ax.errorbar(t[idx], avg[idx], yerr=std[idx], fmt="none", ecolor=color, elinewidth=0.9, capsize=3, alpha=0.75)
 
 
-def _plot_response_mean_std(ax, series, color, label):
+def _plot_response_mean_std(
+    ax,
+    series,
+    color,
+    label,
+    n_remove_highest_mean_curves: int = 0,
+    run_labels=None,
+    report_context: str = None,
+):
+    series = _select_series_for_averaging(
+        series,
+        n_remove_highest_mean_curves,
+        run_labels=run_labels,
+        report_context=report_context,
+    )
     if not series:
         return
     ref_f = np.asarray(series[0][0], dtype=float)
@@ -136,7 +220,7 @@ def _plot_response_mean_std(ax, series, color, label):
     ax.fill_between(f_s, avg_s - std_s, avg_s + std_s, color=color, alpha=0.16, linewidth=0)
 
 
-def plot_results(experiment_name: str) -> None:
+def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) -> None:
     _configure_text_rendering()
     cfg, data, results_root = load_results(experiment_name)
 
@@ -147,6 +231,8 @@ def plot_results(experiment_name: str) -> None:
     tt_transitions = data.get("tt_transitions", {})
     target_example = data.get("target_response_example", None)
     true_lem_example = data.get("true_lem_response_example", None)
+    input_signals = data.get("input_signals", None)
+    run_labels = [_format_input_label(sig) for sig in input_signals] if input_signals else None
 
     if not td_mse_curves or not validation_curves:
         print("No curves found in plot data.")
@@ -205,8 +291,24 @@ def plot_results(experiment_name: str) -> None:
 
         for algo in algorithms:
             key = (tt, algo)
-            _plot_mean_std(ax_td, td_mse_curves.get(key, []), algo_color[algo], _display_algo_label(algo))
-            _plot_mean_std(ax_val, validation_curves.get(key, []), algo_color[algo], _display_algo_label(algo))
+            _plot_mean_std(
+                ax_td,
+                td_mse_curves.get(key, []),
+                algo_color[algo],
+                _display_algo_label(algo),
+                n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+                run_labels=run_labels,
+                report_context=f"tt={tt}, algo={algo}, metric=TD-MSE",
+            )
+            _plot_mean_std(
+                ax_val,
+                validation_curves.get(key, []),
+                algo_color[algo],
+                _display_algo_label(algo),
+                n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+                run_labels=run_labels,
+                report_context=f"tt={tt}, algo={algo}, metric=validation",
+            )
 
         for ax in (ax_td, ax_val):
             trans = tt_transitions.get(tt, None)
@@ -253,7 +355,15 @@ def plot_results(experiment_name: str) -> None:
                 by_algo[algo] = []
             by_algo[algo].extend(series)
         for algo in sorted(by_algo.keys()):
-            _plot_response_mean_std(ax_resp, by_algo[algo], algo_color.get(algo, "C0"), _display_algo_label(algo))
+            _plot_response_mean_std(
+                ax_resp,
+                by_algo[algo],
+                algo_color.get(algo, "C0"),
+                _display_algo_label(algo),
+                n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+                run_labels=run_labels,
+                report_context=f"algo={algo}, metric=final_response",
+            )
     else:
         print("No final_response_curves found in plot data. Re-run experiment_05.py to populate final equalized response subplot.")
 
@@ -321,8 +431,12 @@ def plot_results(experiment_name: str) -> None:
 
 
 def main() -> None:
-    experiment_name = "experiment_05_ablation_debug"
-    plot_results(experiment_name)
+    experiment_name = "experiment_05_ablation_debug_2"
+    n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
+    plot_results(
+        experiment_name,
+        n_remove_highest_mean_curves=n_remove_highest_mean_curves,
+    )
 
 
 if __name__ == "__main__":
