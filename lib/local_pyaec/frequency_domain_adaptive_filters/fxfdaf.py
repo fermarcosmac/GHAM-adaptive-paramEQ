@@ -46,6 +46,7 @@ def fxfdaf(x, d, h_hat, M, mu=0.05, beta=0.9, W_init: np.ndarray = None, x_state
     e_fft = np.concatenate([np.zeros(M),e_n*window])
     E_n = fft(e_fft)
 
+    # Stable normalized FDAF update.
     norm = beta*norm + (1-beta)*np.abs(X_n_f)**2
     G = mu*E_n/(norm+1e-3)
     W = W + X_n_f.conj()*G

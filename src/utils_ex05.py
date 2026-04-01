@@ -5,12 +5,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-from numpy.fft import fft
-from numpy.fft import ifft
+from numpy.fft import rfft
+from numpy.fft import irfft
 import torch
 import torch.nn.functional as F
 import torchaudio
-from scipy.signal import lfilter, minimum_phase
+from scipy.signal import fftconvolve, lfilter, minimum_phase
 from tqdm import tqdm
 
 from lib.local_pyaec.time_domain_adaptive_filters import fxlms as lib_fxlms
@@ -191,12 +191,20 @@ def _fxlms_frame(
     u_f_state: np.ndarray,
     x_state: np.ndarray,
     sec_state: np.ndarray,
+    primary_path_ir_len: int = 20000,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Wrapper around local_pyaec FxLMS for one frame-sized block."""
-    e, w_new, u_state, u_f_state, x_state, sec_state = lib_fxlms.fxlms(
+    lem_ir = np.asarray(lem_ir, dtype=np.float64).reshape(-1)
+    # Truncate true path used in forward simulation to reduce per-frame cost.
+    keep_len = max(1, int(primary_path_ir_len))
+    lem_ir_sim = lem_ir[:keep_len]
+    prev_sec_state = np.asarray(sec_state, dtype=np.float64).reshape(-1)
+
+    e_model, w_new, u_state, u_f_state, x_state, sec_state, y_ctrl = lib_fxlms.fxlms(
         x_block,
         d_block,
         h_hat=h_hat,
+        h_sec=lem_ir_sim,
         N=len(w),
         mu=mu,
         w_init=w,
@@ -205,8 +213,21 @@ def _fxlms_frame(
         x_state=x_state,
         y_state=sec_state,
     )
-    y_out = d_block - e
-    y_ctrl = y_out.copy()
+
+    # Forward simulation through true secondary path via FFT convolution.
+    l_sec = int(len(lem_ir_sim))
+    if l_sec > 1:
+        if prev_sec_state.size != l_sec:
+            prev_sec_state = np.zeros(l_sec, dtype=np.float64)
+        prev_tail = prev_sec_state[l_sec - 2 :: -1]
+        y_in = np.concatenate([prev_tail, np.asarray(y_ctrl, dtype=np.float64)], axis=0)
+        y_full = fftconvolve(y_in, lem_ir_sim, mode="full")
+        start = l_sec - 1
+        y_out = y_full[start : start + len(y_ctrl)]
+    else:
+        y_out = np.asarray(y_ctrl, dtype=np.float64).copy()
+
+    e = np.asarray(d_block[: len(y_out)], dtype=np.float64) - np.asarray(y_out, dtype=np.float64)
     return e, y_ctrl, y_out, w_new, u_state, u_f_state, x_state, sec_state
 
 
@@ -230,7 +251,8 @@ def _fxfdaf_frame(
         # Fallback to a single full-frame block to avoid tail-length shape mismatches.
         m = n
 
-    W = fft(w, n=m + 1)
+    # local_pyaec.fxfdaf uses rfft on 2*M buffers, so W must be length M+1.
+    W = rfft(w, n=2 * m)
     e, W_new, x_state = lib_fxfdaf.fxfdaf(
         x_block,
         d_block,
@@ -241,7 +263,7 @@ def _fxfdaf_frame(
         W_init=W,
         x_state=x_state,
     )
-    w_new = ifft(W_new, n=m + 1)[:m]
+    w_new = irfft(W_new, n=2 * m)[:m]
 
     # Ensure error vector matches current frame length for stable downstream bookkeeping.
     if len(e) != len(d_block):
@@ -290,6 +312,7 @@ def run_fir_baseline_experiment(
 
     mu = float(algo_cfg.get("mu", 0.01))
     beta = float(algo_cfg.get("beta", 0.9))
+    primary_path_ir_len = int(algo_cfg.get("primary_path_ir_len", 20000))
     n_ctrl = int(algo_cfg.get("filter_len", frame_len))
     n_ctrl = max(8, min(n_ctrl, frame_len * 2))
     fdaf_block_size = int(algo_cfg.get("block_size", n_ctrl))
@@ -297,7 +320,7 @@ def run_fir_baseline_experiment(
 
     # TODO: estimate h_hat from input/output data
     h_hat = np.asarray(rir_ctx["rirs"][0], dtype=np.float64)
-    h_hat = h_hat[:8192] # TODO: hardcoded!
+    h_hat = h_hat[:48000] # TODO: hardcoded!
     # max_h_hat_len = int(algo_cfg.get("h_hat_len", 0))
     # if max_h_hat_len > 0:
     #     h_hat = h_hat[:max_h_hat_len]
@@ -349,6 +372,7 @@ def run_fir_baseline_experiment(
                 u_f_state,
                 x_state,
                 sec_state,
+                primary_path_ir_len,
             )
         elif algorithm == "FxFDAF":
             e_fr, y_ctrl_fr, y_out_fr, w_fr, x_state_fdaf = _fxfdaf_frame(

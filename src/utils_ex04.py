@@ -1,15 +1,21 @@
-import json, itertools, random, sys, math, time, torch, torchaudio, warnings
+import json, itertools, random, sys, math, time, torch, torchaudio, warnings, os
 from pathlib import Path
 root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root))
 sys.path.insert(0, str(root / "lib"))
 from typing import Dict, Any, Iterable, List, Tuple
 import numpy as np
+import matplotlib
+if os.environ.get("MPLBACKEND") is None:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from scipy.optimize import least_squares
 from scipy.signal import minimum_phase
-import soundfile as sf
+try:
+    import soundfile as sf
+except Exception:
+    sf = None
 import torch.nn.functional as F
 from torch.func import jacrev, jacfwd
 from torch.linalg import lstsq
@@ -1084,10 +1090,18 @@ def load_rirs(rir_dir: Path, max_n: int = None, normalize: bool = False) -> Tupl
     rirs = []
     srs = []
     for f in files:
-        data, sr = sf.read(str(f))
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        data = data.astype(np.float32)
+        if sf is not None:
+            data, sr = sf.read(str(f))
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            data = data.astype(np.float32)
+        else:
+            wav, sr = torchaudio.load(str(f))
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=False)
+            else:
+                wav = wav.squeeze(0)
+            data = wav.detach().cpu().numpy().astype(np.float32)
         rirs.append(data)
         srs.append(sr)
     if normalize and len(rirs) > 0:

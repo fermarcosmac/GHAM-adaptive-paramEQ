@@ -2,11 +2,18 @@ import sys
 from pathlib import Path
 from typing import List, Callable, Tuple, Optional
 import numpy as np
-import soundfile as sf
+try:
+    import soundfile as sf
+except Exception:
+    sf = None
 from scipy.signal import fftconvolve, resample_poly, correlate, correlation_lags
 from scipy.optimize import least_squares
 import bisect
 import warnings
+import os
+import matplotlib
+if os.environ.get("MPLBACKEND") is None:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -30,12 +37,20 @@ def load_audio(path: Path) -> Tuple[np.ndarray, int]:
         audio (np.ndarray, shape=(N,)): floating point audio in range [-1, 1]
         sr (int): sample rate
     """
-    data, sr = sf.read(str(path))
-    if data.ndim > 1:
-        # Convert to mono by averaging channels (simple default)
-        data = data.mean(axis=1)
-    # ensure float32
-    data = data.astype(np.float32)
+    if sf is not None:
+        data, sr = sf.read(str(path))
+        if data.ndim > 1:
+            # Convert to mono by averaging channels (simple default)
+            data = data.mean(axis=1)
+        # ensure float32
+        data = data.astype(np.float32)
+    else:
+        wav, sr = torchaudio.load(str(path))
+        if wav.shape[0] > 1:
+            wav = wav.mean(dim=0, keepdim=False)
+        else:
+            wav = wav.squeeze(0)
+        data = wav.detach().cpu().numpy().astype(np.float32)
     return data, sr
 
 
@@ -55,7 +70,11 @@ def save_audio(path: Path, data: np.ndarray, sr: int) -> None:
     else:
         scaled_data = data
     
-    sf.write(str(path), scaled_data, sr)
+    if sf is not None:
+        sf.write(str(path), scaled_data, sr)
+    else:
+        t = torch.from_numpy(np.asarray(scaled_data, dtype=np.float32)).unsqueeze(0)
+        torchaudio.save(str(path), t, int(sr))
 
 
 
@@ -73,10 +92,18 @@ def load_rirs(rir_dir: Path, max_n: int = None) -> Tuple[List[np.ndarray], List[
     rirs = []
     srs = []
     for f in files:
-        data, sr = sf.read(str(f))
-        if data.ndim > 1:
-            data = data.mean(axis=1)
-        data = data.astype(np.float32)
+        if sf is not None:
+            data, sr = sf.read(str(f))
+            if data.ndim > 1:
+                data = data.mean(axis=1)
+            data = data.astype(np.float32)
+        else:
+            wav, sr = torchaudio.load(str(f))
+            if wav.shape[0] > 1:
+                wav = wav.mean(dim=0, keepdim=False)
+            else:
+                wav = wav.squeeze(0)
+            data = wav.detach().cpu().numpy().astype(np.float32)
         # Normalize so that maximum absolute value is one
         peak = np.max(np.abs(data))
         if peak > 0:
