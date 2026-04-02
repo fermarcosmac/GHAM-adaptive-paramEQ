@@ -38,7 +38,7 @@ mpl.rcParams.update(
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
-EXPERIMENT_NAME = "experiment_05_ablation_debug"
+EXPERIMENT_NAME = "experiment_05_ablation_debug_2"
 MODE = "ALL_SONGS"  # "ALL_SONGS" or "WHITE_NOISE"
 WINDOW_SECONDS = 180.0  # no-overlap sliding window length
 EVAL_LAST_S = 150.0  # if > 0, evaluate once on last EVAL_LAST_S seconds instead of windowing
