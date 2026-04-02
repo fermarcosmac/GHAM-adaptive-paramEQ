@@ -432,8 +432,8 @@ def plot_results(experiment_name: str, n_remove_highest_mean_curves: int = 0) ->
 
 
 def main() -> None:
-    experiment_name = "experiment_05_ablation_debug"
-    n_remove_highest_mean_curves = 2  # Set 0 to keep all curves, or n to remove the n highest-mean runs
+    experiment_name = "experiment_05_ablation_debug_2"
+    n_remove_highest_mean_curves = 10  # Set 0 to keep all curves, or n to remove the n highest-mean runs
     plot_results(
         experiment_name,
         n_remove_highest_mean_curves=n_remove_highest_mean_curves,
