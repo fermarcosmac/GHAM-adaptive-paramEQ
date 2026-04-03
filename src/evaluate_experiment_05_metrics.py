@@ -48,6 +48,9 @@ DITHER_SEED = 12345
 MAX_PLOTTED_ERRORBARS = 12
 SHOW_TQDM_PROGRESS = True
 SUPPRESS_INTERNAL_METRIC_PRINTS = True
+# Set to None to evaluate all optimizers found in output filenames.
+# Otherwise, list optimizer names exactly as they appear in EQ filenames.
+SELECTED_OPTIMIZERS: list[str] | None = ["FxFDAF"]
 
 # -----------------------------------------------------------------------------
 # Metric placeholders (replace with your final implementations later)
@@ -352,6 +355,15 @@ def mode_song_filter(song_name: str) -> bool:
     raise ValueError(f"Unsupported MODE={MODE}. Use ALL_SONGS or WHITE_NOISE.")
 
 
+def get_selected_optimizer_set() -> set[str] | None:
+    if SELECTED_OPTIMIZERS is None:
+        return None
+    selected = {opt.strip() for opt in SELECTED_OPTIMIZERS if opt and opt.strip()}
+    if not selected:
+        raise ValueError("SELECTED_OPTIMIZERS is set but empty. Use None to evaluate all optimizers.")
+    return selected
+
+
 def compute_windowed_metric(
     reference: np.ndarray,
     degraded: np.ndarray,
@@ -417,6 +429,7 @@ def align_and_stack(series_list: list[np.ndarray]) -> np.ndarray:
 def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
     songs = sorted(set(parsed.desired.keys()) & set(parsed.noeq.keys()))
     songs = [s for s in songs if mode_song_filter(s)]
+    selected_optimizers = get_selected_optimizer_set()
 
     if not songs:
         raise RuntimeError(
@@ -437,7 +450,24 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
         key=lambda c: (c.transition_seconds, c.loss, c.optimizer),
     )
 
+    available_optimizers = sorted({c.optimizer for c in all_conditions})
+    if selected_optimizers is not None:
+        missing_optimizers = sorted(selected_optimizers - set(available_optimizers))
+        if missing_optimizers:
+            print("Warning: Some selected optimizers were not found in parsed EQ files:")
+            for opt in missing_optimizers:
+                print(f"  - {opt}")
+
+        all_conditions = [c for c in all_conditions if c.optimizer in selected_optimizers]
+
     if not all_conditions:
+        if selected_optimizers is not None:
+            selected_print = ", ".join(sorted(selected_optimizers))
+            available_print = ", ".join(available_optimizers) if available_optimizers else "<none>"
+            raise RuntimeError(
+                "No EQ files found for SELECTED_OPTIMIZERS in "
+                f"{output_dir}. Selected=[{selected_print}], available=[{available_print}]"
+            )
         raise RuntimeError(f"No EQ files found in: {output_dir}")
 
     # Add synthetic noEQ conditions as optimizer="No EQ" for each (loss, transition).
@@ -464,6 +494,10 @@ def compute_all_metrics(parsed: ParsedFiles, output_dir: Path) -> dict:
 
     print(f"Mode: {MODE}")
     print(f"Experiment output directory: {output_dir}")
+    if selected_optimizers is None:
+        print("Optimizer selection: all optimizers")
+    else:
+        print(f"Optimizer selection: {', '.join(sorted(selected_optimizers))}")
     print(f"Songs selected: {len(songs)}")
     for s in songs:
         print(f"  - {s}")
